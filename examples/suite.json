@@ -1,0 +1,13 @@
+{
+  "schema": 1,
+  "forgejo": "https://forgejo.example.invalid",
+  "registry": "forgejo.example.invalid",
+  "repository": "example/tool-suite",
+  "source_push": false,
+  "version": {"kind": "file", "path": "VERSION"},
+  "checks": [],
+  "images": [
+    {"name": "base", "platforms": ["linux/amd64"], "dockerfile": "docker/base.Dockerfile"},
+    {"name": "child", "platforms": ["linux/amd64"], "dependencies": ["base"], "build": ["python3", "hooks/dependent_build.py"]}
+  ]
+}

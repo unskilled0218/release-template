@@ -1,0 +1,10 @@
+{
+  "schema": 1,
+  "forgejo": "https://forgejo.example.invalid",
+  "registry": "forgejo.example.invalid",
+  "repository": "example/service",
+  "source_push": false,
+  "version": {"kind": "explicit"},
+  "checks": [["python3", "-B", "-m", "unittest", "discover", "-s", "tests"]],
+  "images": [{"name": "service", "platforms": ["linux/amd64", "linux/arm64"]}]
+}

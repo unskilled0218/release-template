@@ -1,0 +1,12 @@
+{
+  "schema": 1,
+  "forgejo": "https://forgejo.example.invalid",
+  "registry": "forgejo.example.invalid",
+  "repository": "example/node-service",
+  "source_push": true,
+  "version": {"kind": "package", "path": "package.json"},
+  "checks": [["npm", "test"], ["npm", "run", "check"]],
+  "images": [
+    {"name": "node-service", "platforms": ["linux/amd64", "linux/arm64"], "dockerfile": "Dockerfile", "context": "."}
+  ]
+}
