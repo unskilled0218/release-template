@@ -1,1 +1,1 @@
-"""Hermetic tests; never read the real Forgejo token or contact production."""
+"""Hermetic tests; never read the real Gitea token or contact production."""

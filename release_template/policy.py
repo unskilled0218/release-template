@@ -9,7 +9,7 @@ MARKER = "\nRelease identity:\n"
 
 
 def description(identity):
-  return "Container release " + identity["version"] + ". Images are published in Forgejo Packages.\n" + MARKER + canonical(identity).decode()
+  return "Container release " + identity["version"] + ". Images are published in Gitea Packages.\n" + MARKER + canonical(identity).decode()
 
 
 def metadata(release):

@@ -1,4 +1,4 @@
-"""Bounded external commands, trusted HTTP, Forgejo and OCI evidence."""
+"""Bounded external commands, trusted HTTP, Gitea and OCI evidence."""
 
 import base64
 import json
@@ -15,7 +15,7 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import quote, urlencode, urlsplit
 from urllib.request import HTTPRedirectHandler, Request, build_opener, HTTPSHandler
 
-from .config import endpoint
+from .config import CREDENTIAL_VARIABLES, UNSUPPORTED_CREDENTIAL_VARIABLES, endpoint
 from .core import ReleaseError, canonical, digest, load, require
 from .oci import immutable, runnable
 
@@ -25,7 +25,7 @@ class Runner:
     self.root = Path(root)
     self.token = token
     self.environment = {key: value for key, value in os.environ.items()
-                        if key not in ("FORGEJO_TOKEN", "FORGEJO_USERNAME", "FORGEJO_USER")}
+                        if key not in CREDENTIAL_VARIABLES + UNSUPPORTED_CREDENTIAL_VARIABLES}
 
   def run(self, arguments, input_text=None, extra=None):
     environment = self.environment | (extra or {})
@@ -139,9 +139,9 @@ def json_response(data):
     raise ReleaseError("Malformed remote JSON") from exc
 
 
-class Forgejo:
+class Gitea:
   def __init__(self, config, token):
-    self.http = HTTP(config["forgejo"], config.get("test_http", False))
+    self.http = HTTP(config["gitea"], config.get("test_http", False))
     self.repository = config["repository"]
     self.owner, self.repo = self.repository.split("/")
     self.base = "/api/v1/repos/" + "/".join(quote(x, safe="") for x in (self.owner, self.repo))
@@ -168,7 +168,9 @@ class Forgejo:
     return self.pages(self.base + "/releases")
 
   def release(self, tag):
-    return self.get(self.base + "/releases/tags/" + quote(tag, safe=""), absent=True)
+    release = self.get(self.base + "/releases/tags/" + quote(tag, safe=""), absent=True)
+    require(release is None or isinstance(release, dict), "Expected Gitea release object")
+    return release
 
   def publish(self, tag, commit, body):
     payload = {"tag_name": tag, "target_commitish": commit, "name": tag,
@@ -196,7 +198,7 @@ class Registry:
     "application/vnd.oci.image.manifest.v1+json", "application/vnd.docker.distribution.manifest.v2+json"))
 
   def __init__(self, config, username, token):
-    self.http = HTTP(config["forgejo"], config.get("test_http", False))
+    self.http = HTTP(config["gitea"], config.get("test_http", False))
     self.owner = config["repository"].split("/")[0]
     self.basic = "Basic " + base64.b64encode((username + ":" + token).encode()).decode()
     self.bearer = {}
@@ -311,7 +313,7 @@ def git_identity(runner, config):
   require(runner.run(["git", "branch", "--show-current"]).strip() == "main", "Release requires clean main")
   require(not runner.run(["git", "status", "--porcelain", "--untracked-files=all"]).strip(), "Release requires a clean checkout")
   commit = runner.run(["git", "rev-parse", "HEAD"]).strip()
-  expected = urlsplit(config["forgejo"]).netloc
+  expected = urlsplit(config["gitea"]).netloc
   for mode in (["--push", "--all"], ["--all"]):
     remote = runner.run(["git", "remote", "get-url", *mode, "origin"]).splitlines()
     require(len(remote) == 1, "Origin must have one fetch and one push destination")
@@ -323,11 +325,11 @@ def git_identity(runner, config):
       authority = parsed.netloc.rsplit("@", 1)[-1]
       if parsed.scheme == "ssh":
         require(parsed.username in (None, "git"), "Unexpected SSH identity")
-        authority = expected if parsed.hostname == urlsplit(config["forgejo"]).hostname else parsed.hostname
+        authority = expected if parsed.hostname == urlsplit(config["gitea"]).hostname else parsed.hostname
       else:
         require(not parsed.username, "HTTPS Git credentials must not appear in remote URL")
       path = parsed.path.strip("/").removesuffix(".git")
-      require(authority == expected and path == config["repository"], "Git destination differs from configured Forgejo repository")
+      require(authority == expected and path == config["repository"], "Git destination differs from configured Gitea repository")
     else:
-      require(address == "git@" + urlsplit(config["forgejo"]).hostname + ":" + config["repository"] + ".git", "Unsupported Git destination")
+      require(address == "git@" + urlsplit(config["gitea"]).hostname + ":" + config["repository"] + ".git", "Unsupported Git destination")
   return commit

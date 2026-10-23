@@ -9,6 +9,22 @@ from urllib.parse import urlsplit
 from .core import child, command, image_order, load, require, version
 
 
+CREDENTIAL_VARIABLES = ("GIT_TOKEN", "GIT_USERNAME")
+UNSUPPORTED_CREDENTIAL_VARIABLES = ("GIT_USER", "GITEA_TOKEN", "GITEA_USERNAME", "GITEA_USER",
+                                    "FORGEJO_TOKEN", "FORGEJO_USERNAME", "FORGEJO_USER")
+
+
+def server_version(value):
+  """Validate a full server version without normalizing identity-bearing suffixes."""
+  number = r"(?:0|[1-9][0-9]*)"
+  prerelease = r"(?:0|[1-9][0-9]*|[0-9]*[A-Za-z-][0-9A-Za-z-]*)"
+  build = r"[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*"
+  pattern = rf"{number}\.{number}\.{number}(?:-{prerelease}(?:\.{prerelease})*)?(?:\+{build})?"
+  require(isinstance(value, str) and len(value) <= 128 and re.fullmatch(pattern, value),
+          "Gitea server version must be full MAJOR.MINOR.PATCH with optional prerelease/build suffixes")
+  return value
+
+
 def endpoint(url, test_http=False):
   parsed = urlsplit(url)
   require(parsed.scheme == "https" or (
@@ -21,12 +37,15 @@ def endpoint(url, test_http=False):
 
 
 def validate(data, root):
-  require(isinstance(data, dict) and data.get("schema") == 1, "Unknown configuration schema")
-  endpoint(data.get("forgejo", ""), data.get("test_http", False))
+  require(isinstance(data, dict), "Configuration must be an object")
+  require("forgejo" not in data and data.get("schema") != 1,
+          "Legacy Forgejo configuration is unsupported; migrate to schema 2 with gitea origin")
+  require(type(data.get("schema")) is int and data["schema"] == 2, "Unknown configuration schema; expected schema 2")
+  endpoint(data.get("gitea", ""), data.get("test_http", False))
   require(re.fullmatch(r"[a-zA-Z0-9_.-]+/[a-zA-Z0-9_.-]+", data.get("repository", "")),
           "Repository must be explicit owner/name")
   require(re.fullmatch(r"[a-z0-9.-]+(?::[0-9]+)?", data.get("registry", "")), "Invalid registry authority")
-  require(urlsplit(data["forgejo"]).netloc == data["registry"], "Forgejo and registry origins must match")
+  require(urlsplit(data["gitea"]).netloc == data["registry"], "Gitea and registry origins must match")
   require(isinstance(data.get("source_push", False), bool), "source_push must be boolean")
   source = data.get("version", {})
   require(source.get("kind") in ("package", "file", "explicit", "command"), "Unknown version source")
@@ -83,8 +102,13 @@ def read_version(config, root, runner, explicit=None):
 
 def credentials(environment=None):
   environment = os.environ if environment is None else environment
-  configured = environment.get("FORGEJO_TOKEN", "~/.config/forgejo/forgejo-token")
-  require(bool(configured), "FORGEJO_TOKEN must select a nonempty token-file path")
+  require(not any(key in environment for key in UNSUPPORTED_CREDENTIAL_VARIABLES),
+          "Unsupported credential settings; use only GIT_TOKEN (file path) and GIT_USERNAME (login)")
+  username = environment.get("GIT_USERNAME")
+  require(isinstance(username, str) and re.fullmatch(r"[a-zA-Z0-9_.-]+", username),
+          "Set GIT_USERNAME to the token owner's login; no username alias or owner fallback is supported")
+  configured = environment.get("GIT_TOKEN", "~/.config/gitea/gitea-token")
+  require(isinstance(configured, str) and configured, "GIT_TOKEN must select a nonempty token-file path")
   home = environment.get("HOME", str(Path.home()))
   require(not configured.startswith("~") or configured == "~" or configured.startswith("~/"),
           "Only the current user's home expansion is supported")
@@ -99,8 +123,4 @@ def credentials(environment=None):
     from .core import ReleaseError
     raise ReleaseError("Cannot read protected token file") from exc
   require(token and not any(character.isspace() for character in token), "Token file is empty or malformed")
-  username = environment.get("FORGEJO_USERNAME") or environment.get("FORGEJO_USER")
-  require(username and re.fullmatch(r"[a-zA-Z0-9_.-]+", username), "Set FORGEJO_USERNAME to the token owner's login")
-  require(not (environment.get("FORGEJO_USERNAME") and environment.get("FORGEJO_USER")) or
-          environment["FORGEJO_USERNAME"] == environment["FORGEJO_USER"], "Conflicting Forgejo login variables")
   return username, token

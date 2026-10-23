@@ -11,14 +11,14 @@ from .state import State
 
 
 class Workflow:
-  def __init__(self, root, config, release_version, revision, runner, registry, forgejo, commit):
+  def __init__(self, root, config, release_version, revision, runner, registry, gitea, commit):
     self.root, self.config = Path(root), config
     self.release_version, self.tag = release_version, "v" + release_version
-    self.runner, self.registry, self.forgejo, self.commit = runner, registry, forgejo, commit
+    self.runner, self.registry, self.gitea, self.commit = runner, registry, gitea, commit
     identity = {"repository": config["repository"], "version": release_version,
                 "commit": commit, "config": digest(canonical(config)), "template": revision}
     self.state = State(self.root / ".release-template" / (self.tag + ".json"), identity)
-    self.source = config["forgejo"].rstrip("/") + "/" + config["repository"]
+    self.source = config["gitea"].rstrip("/") + "/" + config["repository"]
 
   def aliases(self):
     result = {}
@@ -49,7 +49,7 @@ class Workflow:
   def snapshot(self):
     if "predecessor" in self.state.data:
       return
-    accepted = published(self.forgejo.releases())
+    accepted = published(self.gitea.releases())
     aliases = self.aliases()
     if accepted is None:
       require(all(value is None for value in aliases.values()), "Existing aliases have no recognized predecessor release")
@@ -66,7 +66,7 @@ class Workflow:
     self.state.flush()
 
   def eligibility(self):
-    accepted = published(self.forgejo.releases())
+    accepted = published(self.gitea.releases())
     predecessor = self.state.data["predecessor"]
     if accepted is not None:
       require(accepted.get("repository") == self.config["repository"], "Publication repository differs")
@@ -116,7 +116,7 @@ class Workflow:
   def prepare_image(self, image):
     name = image["name"]
     staging_tag = "rt-" + self.state.data["run"] + "-" + name
-    reference = self.config["registry"] + "/" + self.forgejo.owner + "/" + name
+    reference = self.config["registry"] + "/" + self.gitea.owner + "/" + name
     metadata_path = self.state.path.parent / (self.state.data["run"] + "-" + name + ".build")
     details = {"tag": staging_tag, "image": reference, "commit": self.commit, "platforms": image["platforms"]}
     operation_name = "build:" + name
@@ -177,7 +177,7 @@ class Workflow:
       name, tag = alias.split(":", 1)
       self.state.intent("promote:" + alias, {"digest": target, "alias": alias})
       if self.registry.resolve(name, tag) != target:
-        reference = self.config["registry"] + "/" + self.forgejo.owner + "/" + name
+        reference = self.config["registry"] + "/" + self.gitea.owner + "/" + name
         self.runner.run(["docker", "buildx", "imagetools", "create", "--prefer-index=false",
                          "--tag", reference + ":" + tag, reference + "@" + target])
       require(self.registry.resolve(name, tag) == target, "Promotion changed the prepared manifest identity")
@@ -187,7 +187,7 @@ class Workflow:
     self.eligibility()
     require(len(self.state.data["outputs"]) == len(self.config["images"]), "Publication has missing prepared images")
     require(self.aliases() == self.targets(), "Final aliases do not identify the prepared release")
-    release = self.forgejo.release(self.tag)
+    release = self.gitea.release(self.tag)
     require(release is not None and not release.get("draft") and not release.get("prerelease") and
             not release.get("assets") and metadata(release) == self.release_identity(), "Text-only release not verified")
     for image in self.config["images"]:
@@ -224,9 +224,9 @@ class Workflow:
     self.eligibility()
     body = description(self.release_identity())
     self.state.intent("release", {"body": body, "tag": self.tag})
-    existing = self.forgejo.release(self.tag)
+    existing = self.gitea.release(self.tag)
     if existing is None:
-      self.forgejo.publish(self.tag, self.commit, body)
+      self.gitea.publish(self.tag, self.commit, body)
     else:
       require(metadata(existing) == self.release_identity() and not existing.get("assets") and
               not existing.get("draft") and not existing.get("prerelease"), "Existing release conflicts")

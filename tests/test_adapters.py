@@ -9,7 +9,7 @@ from types import SimpleNamespace
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from unittest.mock import patch
 
-from release_template.adapters import Forgejo, HTTP, Registry, Runner, git_identity, preflight
+from release_template.adapters import Gitea, HTTP, Registry, Runner, git_identity, preflight
 from release_template.core import ReleaseError, canonical, digest
 from release_template.cleanup import plan, digest_owned
 from release_template.oci import OCI_MANIFEST, INDEX_TYPES, IMAGE_CONFIGS, EMPTY_CONFIG, ATTESTATION_LAYER, runnable
@@ -77,7 +77,7 @@ class AdapterTests(unittest.TestCase):
     self.thread.join()
 
   def config(self):
-    return configuration() | {"forgejo": self.origin, "registry": self.origin.removeprefix("http://"), "test_http": True}
+    return configuration() | {"gitea": self.origin, "registry": self.origin.removeprefix("http://"), "test_http": True}
 
   def put(self, value):
     reference = digest(canonical(value))
@@ -111,7 +111,7 @@ class AdapterTests(unittest.TestCase):
       "annotations": {"vnd.docker.reference.type": "attestation-manifest", "vnd.docker.reference.digest": subject}}
 
   def test_capped_page_size_does_not_stop_enumeration(self):
-    api = Forgejo(self.config(), "fixture-token")
+    api = Gitea(self.config(), "fixture-token")
     self.assertEqual([item["id"] for item in api.releases()], [1, 2])
     self.assertEqual(len(self.requests), 3)
     self.assertTrue(all(auth == "token fixture-token" for _, auth in self.requests))
@@ -119,7 +119,7 @@ class AdapterTests(unittest.TestCase):
   def test_repeated_pagination_fails_instead_of_looping_or_deleting(self):
     self.pages = [[{"id": 1}]]
     with self.assertRaisesRegex(ReleaseError, "advance"):
-      Forgejo(self.config(), "fixture").releases()
+      Gitea(self.config(), "fixture").releases()
 
   def test_no_redirects_forward_authorization(self):
     with self.assertRaisesRegex(ReleaseError, "302"):
@@ -127,7 +127,7 @@ class AdapterTests(unittest.TestCase):
     self.assertEqual(len(self.requests), 1)
 
   def test_package_paths_encode_nested_names_and_digest_versions(self):
-    api = Forgejo(self.config(), "fixture")
+    api = Gitea(self.config(), "fixture")
     self.assertEqual(api.package_path("nested/name", "sha256:abc"),
                      "/api/v1/packages/fixtures/container/nested%2Fname/sha256%3Aabc")
 
@@ -259,7 +259,7 @@ class AdapterTests(unittest.TestCase):
       workflow = SimpleNamespace(config=self.config(), release_version="2.0.0", tag="v2.0.0", registry=registry,
         state=SimpleNamespace(path=Path(temporary) / "v2.0.0.json",
           data={"run": "fixture", "outputs": {"application": {"digest": current}}, "staging": {}}),
-        forgejo=SimpleNamespace(packages=lambda: records, releases=lambda: []))
+        gitea=SimpleNamespace(packages=lambda: records, releases=lambda: []))
       # The publication precondition is checked through the real registry, not a no-op.
       workflow.verify_publication = lambda: registry.verify("application", current, ["linux/amd64"], COMMIT,
         "2.0.0", self.labels()["org.opencontainers.image.source"])
@@ -285,12 +285,12 @@ class AdapterTests(unittest.TestCase):
     original = runner.run
     def run(arguments, **kwargs):
       if arguments[:3] == ["git", "remote", "get-url"]:
-        return "ssh://git@forgejo.invalid:2222/fixtures/application.git\n"
+        return "ssh://git@gitea.invalid:2222/fixtures/application.git\n"
       return original(arguments, **kwargs)
     runner.run = run
-    config = configuration() | {"forgejo": "https://forgejo.invalid:8443", "registry": "forgejo.invalid:8443"}
+    config = configuration() | {"gitea": "https://gitea.invalid:8443", "registry": "gitea.invalid:8443"}
     self.assertEqual(git_identity(runner, config), COMMIT)
-    for invalid in ("https://token@forgejo.invalid/fixtures/application.git", "https://other.invalid/fixtures/application.git"):
+    for invalid in ("https://token@gitea.invalid/fixtures/application.git", "https://other.invalid/fixtures/application.git"):
       def bad_fetch(arguments, **kwargs):
         if arguments[:3] == ["git", "remote", "get-url"] and "--push" not in arguments:
           return invalid
@@ -349,7 +349,7 @@ if args==["context", "show"]:
 elif args[:1]==["login"]:
   assert sys.stdin.read()=="fixture-token"
   p=Path(os.environ["DOCKER_CONFIG"])
-  assert json.loads((p/"config.json").read_text())=={"auths":{"forgejo.invalid":{}}}
+  assert json.loads((p/"config.json").read_text())=={"auths":{"gitea.invalid":{}}}
   assert os.environ["DOCKER_HOST"]=="unix:///fixture.sock"
   assert os.environ["BUILDX_BUILDER"]=="fixture-builder"
 else:
@@ -360,7 +360,7 @@ else:
       runner.environment.update({"PATH": str(root) + os.pathsep + os.environ["PATH"],
                                  "DOCKER_HOST": "unix:///fixture.sock", "BUILDX_BUILDER": "fixture-builder"})
       original = runner.environment.copy()
-      with runner.docker_auth("forgejo.invalid", "fixture", "fixture-token"):
+      with runner.docker_auth("gitea.invalid", "fixture", "fixture-token"):
         auth_directory = Path(runner.environment["DOCKER_CONFIG"])
         self.assertTrue(auth_directory.is_dir())
       self.assertFalse(auth_directory.exists())

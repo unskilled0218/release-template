@@ -199,7 +199,7 @@ class UpdateTests(unittest.TestCase):
     (self.destination / "release.json").write_text(json.dumps(configuration()))
     result = subprocess.run([sys.executable, str(self.destination / "scripts/launch.py"), "validate"],
                             capture_output=True, text=True,
-                            env=os.environ | {"FORGEJO_TOKEN": "/never-read-fixture-token"})
+                            env=os.environ | {"GIT_TOKEN": "/never-read-fixture-token"})
     self.assertEqual(result.returncode, 0, result.stderr)
     self.assertIn("no credentials", result.stdout)
     self.assertFalse(list((self.destination / "scripts/release-template").rglob("*.pyc")))

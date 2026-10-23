@@ -13,7 +13,7 @@ REVISION = "b" * 40
 
 
 def configuration():
-  return {"schema": 1, "forgejo": "https://forgejo.invalid", "registry": "forgejo.invalid",
+  return {"schema": 2, "gitea": "https://gitea.invalid", "registry": "gitea.invalid",
           "repository": "fixtures/application", "source_push": False,
           "version": {"kind": "explicit"}, "checks": [["check-project"]],
           "images": [{"name": "application", "platforms": ["linux/amd64", "linux/arm64"]}]}
@@ -23,7 +23,7 @@ class FakeRegistry:
   def __init__(self):
     self.aliases, self.images = {}, {}
 
-  def add(self, name, tag, release_version, commit=COMMIT, source="https://forgejo.invalid/fixtures/application",
+  def add(self, name, tag, release_version, commit=COMMIT, source="https://gitea.invalid/fixtures/application",
           platforms=("linux/amd64", "linux/arm64")):
     root = digest((name + release_version + commit).encode())
     child = digest((root + "child").encode())
@@ -64,7 +64,7 @@ class FakeRegistry:
     return image["graph"] | set(nodes), {"root": root, "nodes": nodes}
 
 
-class FakeForgejo:
+class FakeGitea:
   owner = "fixtures"
   def __init__(self, registry):
     self.registry = registry
@@ -94,7 +94,7 @@ class FakeForgejo:
 
   def get(self, path, absent=False):
     if path == "/api/v1/version":
-      return {"version": "17.0.0"}
+      return {"version": "28.2.0"}
     name, reference = path.split(":", 1)
     return next((copy.deepcopy(item) for item in self.package_records if
                  item["name"] == name and item["version"] == reference), None)
@@ -147,7 +147,7 @@ class FakeRunner:
     if arguments[:3] == ["git", "check-ignore", "--quiet"]:
       return ""
     if arguments[:3] == ["git", "remote", "get-url"]:
-      return "https://forgejo.invalid/fixtures/application.git\n"
+      return "https://gitea.invalid/fixtures/application.git\n"
     if arguments[:2] == ["git", "ls-remote"]:
       if "refs/heads/main" in arguments:
         return self.remote_commit + "\trefs/heads/main\n"
@@ -203,7 +203,7 @@ def package(name, reference, repository="fixtures/application"):
 
 
 def evidence(path):
-  record = {"schema": 1, "origin": "https://forgejo.invalid", "server_major": 17,
+  record = {"schema": 2, "product": "gitea", "origin": "https://gitea.invalid", "server_version": "28.2.0",
             "disposable_repository": "fixtures/disposable-contract", "operator": "fixture",
             "verified_at": "2026-10-22", "alias_preserves_shared_manifest": True,
             "digest_deletion_is_scoped": True, "retained_platforms_pullable": True}

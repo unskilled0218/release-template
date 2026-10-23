@@ -9,8 +9,8 @@ import unittest
 from unittest.mock import patch
 
 from release_template import cli
-from release_template.core import ReleaseError
-from tests.support import REVISION, FakeForgejo, FakeRegistry, FakeRunner, configuration, evidence, package
+from release_template.core import ReleaseError, canonical, digest
+from tests.support import REVISION, FakeGitea, FakeRegistry, FakeRunner, configuration, evidence, package
 
 
 class CLITests(unittest.TestCase):
@@ -20,11 +20,11 @@ class CLITests(unittest.TestCase):
     self.root = Path(self.temporary.name)
     (self.root / "release.json").write_text(json.dumps(configuration()))
     self.registry = FakeRegistry()
-    self.forgejo = FakeForgejo(self.registry)
+    self.gitea = FakeGitea(self.registry)
     self.runner = FakeRunner(self.registry)
     self.output, self.errors = io.StringIO(), io.StringIO()
     for target, replacement in (("credentials", ("fixture", "private-token")), ("Runner", self.runner),
-                                ("Registry", self.registry), ("Forgejo", self.forgejo)):
+                                ("Registry", self.registry), ("Gitea", self.gitea)):
       mock = patch.object(cli, target, return_value=replacement).start()
       self.addCleanup(patch.stopall)
       setattr(self, target, mock)
@@ -37,17 +37,33 @@ class CLITests(unittest.TestCase):
     self.assertEqual(self.invoke("validate"), 0)
     self.credentials.assert_not_called()
     self.Registry.assert_not_called()
-    self.Forgejo.assert_not_called()
+    self.Gitea.assert_not_called()
     self.assertEqual(self.runner.calls, [])
+
+  def test_legacy_and_mixed_configuration_fail_before_credentials_and_clients(self):
+    valid = configuration()
+    legacy = {key: value for key, value in valid.items() if key != "gitea"}
+    legacy.update({"schema": 1, "forgejo": valid["gitea"]})
+    for config in (legacy, valid | {"schema": 1}, valid | {"forgejo": valid["gitea"]}):
+      for mode in ("validate", "publish", "resume", "cleanup-plan", "cleanup", "abandon"):
+        with self.subTest(config=config, mode=mode):
+          (self.root / "release.json").write_text(json.dumps(config))
+          self.assertEqual(self.invoke(mode, "--tag", "v1.0.0"), 1)
+          self.assertIn("migrate to schema 2", self.errors.getvalue())
+          self.credentials.assert_not_called()
+          self.Runner.assert_not_called()
+          self.Registry.assert_not_called()
+          self.Gitea.assert_not_called()
+          self.assertFalse((self.root / ".release-template").exists())
 
   def test_publish_resume_and_cleanup_plan_report_recorded_success_without_enabling_deletion(self):
     self.assertEqual(self.invoke("publish", "--tag", "v1.0.0"), 1)
     self.assertIn("Publication succeeded; cleanup incomplete", self.errors.getvalue())
-    self.assertTrue(self.forgejo.release("v1.0.0"))
+    self.assertTrue(self.gitea.release("v1.0.0"))
     self.assertEqual(self.invoke("resume", "--tag", "v1.0.0"), 1)
     self.assertEqual(self.invoke("cleanup-plan", "--tag", "v1.0.0"), 0)
     self.assertEqual(len([call for call in self.runner.calls if call[:3] == ["docker", "buildx", "build"]]), 1)
-    self.assertEqual(self.forgejo.deleted, [])
+    self.assertEqual(self.gitea.deleted, [])
     self.assertNotIn("private-token", self.output.getvalue() + self.errors.getvalue())
 
   def test_platform_preflight_precedes_git_checks_tests_login_and_build(self):
@@ -73,10 +89,10 @@ class CLITests(unittest.TestCase):
   def test_resume_refuses_missing_checkpoint(self):
     self.assertEqual(self.invoke("resume", "--tag", "v1.0.0"), 1)
     self.assertIn("existing verified release checkpoint", self.errors.getvalue())
-    self.assertEqual(self.forgejo.deleted, [])
+    self.assertEqual(self.gitea.deleted, [])
 
   def test_standalone_cli_refuses_test_http_without_contacting_loopback(self):
-    config = configuration() | {"test_http": True, "forgejo": "http://127.0.0.1:1", "registry": "127.0.0.1:1"}
+    config = configuration() | {"test_http": True, "gitea": "http://127.0.0.1:1", "registry": "127.0.0.1:1"}
     (self.root / "release.json").write_text(json.dumps(config))
     code = 'from pathlib import Path; import sys; from release_template.cli import main; raise SystemExit(main(Path(sys.argv[1]), "fixture", ["validate"]))'
     result = subprocess.run([sys.executable, "-B", "-c", code, str(self.root)], capture_output=True, text=True,
@@ -88,7 +104,7 @@ class CLITests(unittest.TestCase):
     self.assertEqual(self.invoke("publish", "--tag", "v1.0.0"), 1)
     checkpoint = self.root / ".release-template/v1.0.0.json"
     before = checkpoint.read_bytes()
-    releases = json.loads(json.dumps(self.forgejo.records))
+    releases = json.loads(json.dumps(self.gitea.records))
     for mode in ("resume", "cleanup-plan", "cleanup"):
       with self.subTest(mode=mode):
         self.runner.calls.clear()
@@ -97,8 +113,8 @@ class CLITests(unittest.TestCase):
         self.assertEqual(status, 1)
         self.assertIn("Checkpoint identity differs", self.errors.getvalue())
         self.assertEqual(checkpoint.read_bytes(), before)
-        self.assertEqual(self.forgejo.records, releases)
-        self.assertEqual(self.forgejo.deleted, [])
+        self.assertEqual(self.gitea.records, releases)
+        self.assertEqual(self.gitea.deleted, [])
         self.assertFalse(any(call[:2] in (["docker", "login"], ["git", "push"]) or
           call[:3] == ["docker", "buildx", "build"] or
           call[:4] == ["docker", "buildx", "imagetools", "create"] for call in self.runner.calls))
@@ -107,9 +123,34 @@ class CLITests(unittest.TestCase):
     self.assertEqual(self.invoke("publish", "--tag", "v1.0.0"), 1)
     checkpoint = json.loads((self.root / ".release-template/v1.0.0.json").read_text())
     staging = checkpoint["staging"]["application"]["tag"]
-    self.forgejo.package_records.append(package("application", staging))
+    self.gitea.package_records.append(package("application", staging))
     evidence_path = evidence(self.root / "evidence.json")
     self.assertEqual(self.invoke("cleanup", "--tag", "v1.0.0", "--deletion-evidence", str(evidence_path)), 0)
-    self.assertEqual(self.forgejo.deleted, [("package", "application", staging)])
+    self.assertEqual(self.gitea.deleted, [("package", "application", staging)])
     self.assertEqual(self.invoke("cleanup", "--tag", "v1.0.0", "--deletion-evidence", str(evidence_path)), 0)
-    self.assertEqual(len(self.forgejo.deleted), 1)
+    self.assertEqual(len(self.gitea.deleted), 1)
+
+  def test_old_configuration_checkpoint_is_not_adopted_under_schema_two(self):
+    self.assertEqual(self.invoke("publish", "--tag", "v1.0.0"), 1)
+    path = self.root / ".release-template/v1.0.0.json"
+    state = json.loads(path.read_text())
+    old_config = configuration()
+    old_config["forgejo"] = old_config.pop("gitea")
+    old_config["schema"] = 1
+    state["identity"]["config"] = digest(canonical(old_config))
+    path.write_text(json.dumps(state))
+    before = path.read_bytes()
+    releases = json.loads(json.dumps(self.gitea.records))
+    aliases = dict(self.registry.aliases)
+    for mode in ("resume", "cleanup-plan", "cleanup"):
+      with self.subTest(mode=mode):
+        self.runner.calls.clear()
+        self.assertEqual(self.invoke(mode, "--tag", "v1.0.0"), 1)
+        self.assertIn("Checkpoint identity differs", self.errors.getvalue())
+        self.assertEqual(path.read_bytes(), before)
+        self.assertEqual(self.gitea.records, releases)
+        self.assertEqual(self.registry.aliases, aliases)
+        self.assertEqual(self.gitea.deleted, [])
+        self.assertFalse(any(call[:2] in (["docker", "login"], ["git", "push"]) or
+          call[:3] == ["docker", "buildx", "build"] or
+          call[:4] == ["docker", "buildx", "imagetools", "create"] for call in self.runner.calls))

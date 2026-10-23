@@ -89,7 +89,7 @@ class RetirementPolicyTests(unittest.TestCase):
         cleanup.validate_retirement(changed)
 
 
-class RemovalForgejo:
+class RemovalGitea:
   """Scoped deletion really removes fixture content; no synthetic graph recovery."""
 
   def __init__(self, server):
@@ -108,7 +108,7 @@ class RemovalForgejo:
 
   def get(self, path, absent=False):
     if path == "/api/v1/version":
-      return {"version": "17.0.0"}
+      return {"version": "28.2.0"}
     name, reference = path.split(":", 1)
     return next((copy.deepcopy(item) for item in self.records if
                  (item["name"], item["version"]) == (name, reference)), None)
@@ -134,11 +134,11 @@ class RetirementIntegrationTests(unittest.TestCase):
     self.config = self.server.config()
     self.config["images"][0]["platforms"] = ["linux/amd64"]
     self.registry = Registry(self.config, "fixture", "fixture-token")
-    self.forgejo = RemovalForgejo(self.server)
+    self.gitea = RemovalGitea(self.server)
     self.current = self.server.image(labels=self.server.labels() | {"org.opencontainers.image.version": "2.0.0"})
     self.identity = {"repository": self.config["repository"], "template": "fixture-revision"}
     self.path = self.root / "checkpoints/v2.0.0.json"
-    self.workflow = SimpleNamespace(config=self.config, registry=self.registry, forgejo=self.forgejo,
+    self.workflow = SimpleNamespace(config=self.config, registry=self.registry, gitea=self.gitea,
       release_version="2.0.0", tag="v2.0.0", state=State(self.path, self.identity))
     self.workflow.state.data["outputs"] = {"application": {"digest": self.current}}
     self.workflow.state.data["published"] = True
@@ -149,7 +149,7 @@ class RetirementIntegrationTests(unittest.TestCase):
     self.evidence.write_text(json.dumps(json.loads(self.evidence.read_text()) | {"origin": self.server.origin}))
 
   def inventory(self, references):
-    self.forgejo.records = [package("application", reference) for reference in references]
+    self.gitea.records = [package("application", reference) for reference in references]
 
   def resume(self):
     self.workflow.state = State(self.path, self.identity)
@@ -160,7 +160,7 @@ class RetirementIntegrationTests(unittest.TestCase):
     parent = self.server.index([{"digest": child}])
     self.inventory([child, parent])
     self.resume()
-    self.assertEqual(self.forgejo.deleted, [("application", parent), ("application", child)])
+    self.assertEqual(self.gitea.deleted, [("application", parent), ("application", child)])
     self.assertTrue(self.workflow.state.data["cleanup_complete"])
     self.workflow.verify_publication()
 
@@ -168,7 +168,7 @@ class RetirementIntegrationTests(unittest.TestCase):
     child = self.server.image()
     parent = self.server.index([{"digest": child}])
     self.inventory([child, parent])
-    self.forgejo.delete_package("application", child)
+    self.gitea.delete_package("application", child)
     with self.assertRaisesRegex(ReleaseError, "absent"):
       self.registry.graph("application", parent)
 
@@ -189,10 +189,10 @@ class RetirementIntegrationTests(unittest.TestCase):
         self.server.content = copy.deepcopy(content)
         self.workflow.state.data = copy.deepcopy(initial)
         self.workflow.state.flush()
-        self.forgejo.deleted.clear()
+        self.gitea.deleted.clear()
         self.inventory(order)
         self.resume()
-        deleted = [reference for _, reference in self.forgejo.deleted]
+        deleted = [reference for _, reference in self.gitea.deleted]
         self.assertLess(deleted.index(outer), deleted.index(nested))
         self.assertLess(deleted.index(nested), deleted.index(child))
         self.assertLess(deleted.index(other), deleted.index(child))
@@ -205,7 +205,7 @@ class RetirementIntegrationTests(unittest.TestCase):
     outer = self.server.index([{"digest": intermediate}])
     self.inventory([child, outer])
     self.resume()
-    self.assertEqual(self.forgejo.deleted, [("application", outer), ("application", child)])
+    self.assertEqual(self.gitea.deleted, [("application", outer), ("application", child)])
     self.assertIn(intermediate, self.server.content)
 
   def test_subject_dependencies_retire_referring_image_first(self):
@@ -213,7 +213,7 @@ class RetirementIntegrationTests(unittest.TestCase):
     referrer = self.server.put(self.server.content[subject] | {"subject": {"digest": subject}})
     self.inventory([subject, referrer])
     self.resume()
-    self.assertEqual(self.forgejo.deleted, [("application", referrer), ("application", subject)])
+    self.assertEqual(self.gitea.deleted, [("application", referrer), ("application", subject)])
 
   def test_ineligible_attestation_subject_root_preserves_its_dependency(self):
     subject = self.server.image()
@@ -221,7 +221,7 @@ class RetirementIntegrationTests(unittest.TestCase):
     self.inventory([subject, attestation["digest"]])
     with self.assertRaisesRegex(ReleaseError, "ambiguous"):
       self.resume()
-    self.assertEqual(self.forgejo.deleted, [])
+    self.assertEqual(self.gitea.deleted, [])
     self.registry.graph("application", attestation["digest"])
     self.workflow.verify_publication()
 
@@ -233,7 +233,7 @@ class RetirementIntegrationTests(unittest.TestCase):
     result = plan(self.workflow)
     self.assertEqual(result["retirement"]["order"], [["application", parent], ["application", child]])
     self.assertEqual(self.path.read_bytes(), before)
-    self.assertEqual(self.forgejo.deleted, [])
+    self.assertEqual(self.gitea.deleted, [])
 
   def test_schedule_is_durable_before_first_delete_and_is_not_replanned(self):
     child = self.server.image()
@@ -244,7 +244,7 @@ class RetirementIntegrationTests(unittest.TestCase):
       inventory = load(self.path)["cleanup"]
       cleanup.validate_retirement(inventory)
       snapshots.append(copy.deepcopy(inventory["retirement"]))
-    self.forgejo.before_delete = assert_approval
+    self.gitea.before_delete = assert_approval
     self.resume()
     self.assertEqual(len(snapshots), 2)
     self.assertEqual(snapshots[0], snapshots[1])
@@ -259,29 +259,29 @@ class RetirementIntegrationTests(unittest.TestCase):
           self.server.content = copy.deepcopy(content)
           self.workflow.state.data = copy.deepcopy(initial)
           self.workflow.state.flush()
-          self.forgejo.deleted.clear()
+          self.gitea.deleted.clear()
           self.inventory(references)
           original = self.workflow.state.flush
           def interrupted_flush():
             completed = sum(bool(item.get("complete")) for item in
               self.workflow.state.data.get("cleanup", {}).get("candidates", []))
-            interrupt = completed == boundary and len(self.forgejo.deleted) == boundary
+            interrupt = completed == boundary and len(self.gitea.deleted) == boundary
             if stage == "before completion flush" and interrupt:
               raise SystemExit("Termination before completion flush")
             original()
             if stage == "after completion flush" and interrupt:
               raise SystemExit("Termination after completion flush")
           def lost_response(name, reference):
-            if stage == "lost response" and len(self.forgejo.deleted) == boundary:
+            if stage == "lost response" and len(self.gitea.deleted) == boundary:
               raise SystemExit("Accepted deletion, response lost")
-          self.forgejo.after_delete = lost_response
+          self.gitea.after_delete = lost_response
           with patch.object(self.workflow.state, "flush", side_effect=interrupted_flush), self.assertRaises(SystemExit):
             apply(self.workflow, self.evidence)
           approved = copy.deepcopy(load(self.path)["cleanup"]["retirement"])
-          self.forgejo.after_delete = None
+          self.gitea.after_delete = None
           self.resume()
-          self.assertEqual(len(self.forgejo.deleted), len(references))
-          self.assertEqual({reference for _, reference in self.forgejo.deleted}, set(references))
+          self.assertEqual(len(self.gitea.deleted), len(references))
+          self.assertEqual({reference for _, reference in self.gitea.deleted}, set(references))
           self.assertEqual(self.workflow.state.data["cleanup"]["retirement"], approved)
           self.assertTrue(self.workflow.state.data["cleanup_complete"])
           self.workflow.verify_publication()
@@ -294,7 +294,7 @@ class RetirementIntegrationTests(unittest.TestCase):
     with patch.object(self.workflow.state, "flush", side_effect=SystemExit("Before durable approval")):
       with self.assertRaises(SystemExit):
         apply(self.workflow, self.evidence)
-    self.assertEqual(self.forgejo.deleted, [])
+    self.assertEqual(self.gitea.deleted, [])
     self.assertEqual(self.path.read_bytes(), before)
     self.resume()
     self.assertTrue(self.workflow.state.data["cleanup_complete"])
@@ -309,25 +309,25 @@ class RetirementIntegrationTests(unittest.TestCase):
         self.server.content = copy.deepcopy(content)
         self.workflow.state.data = copy.deepcopy(initial)
         self.workflow.state.flush()
-        self.forgejo.deleted.clear()
+        self.gitea.deleted.clear()
         self.inventory([child, parent])
         def introduce(name, reference):
           if reference != parent:
             return
           if survivor == "recreated parent":
             self.server.content[parent] = copy.deepcopy(content[parent])
-            self.forgejo.records.append(package("application", parent))
+            self.gitea.records.append(package("application", parent))
           elif survivor == "foreign root":
             root = self.server.index([{"digest": child}])
-            self.forgejo.records.append(package("application", root, "foreign/repository"))
+            self.gitea.records.append(package("application", root, "foreign/repository"))
           else:
             self.server.content[survivor] = copy.deepcopy(content[child])
-            self.forgejo.records.append(package("application", survivor))
-        self.forgejo.after_delete = introduce
+            self.gitea.records.append(package("application", survivor))
+        self.gitea.after_delete = introduce
         with self.assertRaises(ReleaseError):
           apply(self.workflow, self.evidence)
-        self.forgejo.after_delete = None
-        self.assertEqual(self.forgejo.deleted, [("application", parent)])
+        self.gitea.after_delete = None
+        self.assertEqual(self.gitea.deleted, [("application", parent)])
         self.assertIn(child, self.server.content)
         self.workflow.verify_publication()
 
@@ -335,14 +335,14 @@ class RetirementIntegrationTests(unittest.TestCase):
     child = self.server.image()
     parent = self.server.index([{"digest": child}])
     self.inventory([child, parent])
-    original = self.forgejo.get
+    original = self.gitea.get
     def get(path, absent=False):
-      if path == "application:" + parent and ("application", parent) in self.forgejo.deleted:
+      if path == "application:" + parent and ("application", parent) in self.gitea.deleted:
         raise ReleaseError("Remote operation failed with HTTP 401")
       return original(path, absent)
-    with patch.object(self.forgejo, "get", side_effect=get), self.assertRaisesRegex(ReleaseError, "401"):
+    with patch.object(self.gitea, "get", side_effect=get), self.assertRaisesRegex(ReleaseError, "401"):
       apply(self.workflow, self.evidence)
-    self.assertEqual(self.forgejo.deleted, [("application", parent)])
+    self.assertEqual(self.gitea.deleted, [("application", parent)])
     self.assertIn(child, self.server.content)
     self.resume()
     self.assertTrue(self.workflow.state.data["cleanup_complete"])
@@ -353,11 +353,11 @@ class RetirementIntegrationTests(unittest.TestCase):
     self.inventory([child, parent])
     def change(name, reference):
       if reference == parent:
-        self.forgejo.records[0]["repository"] = {"full_name": "other/repository"}
-    self.forgejo.after_delete = change
+        self.gitea.records[0]["repository"] = {"full_name": "other/repository"}
+    self.gitea.after_delete = change
     with self.assertRaises(ReleaseError):
       self.resume()
-    self.assertEqual(self.forgejo.deleted, [("application", parent)])
+    self.assertEqual(self.gitea.deleted, [("application", parent)])
     self.assertIn(child, self.server.content)
 
   def test_intact_matching_identity_legacy_inventory_can_acquire_schedule(self):
@@ -369,7 +369,7 @@ class RetirementIntegrationTests(unittest.TestCase):
     self.workflow.state.data["cleanup"] = inventory
     self.workflow.state.flush()
     self.resume()
-    self.assertEqual(self.forgejo.deleted, [("application", parent), ("application", child)])
+    self.assertEqual(self.gitea.deleted, [("application", parent), ("application", child)])
     self.assertIn("retirement", self.workflow.state.data["cleanup"])
 
   def test_legacy_partial_or_completed_raw_inventory_is_not_adopted(self):
@@ -384,14 +384,14 @@ class RetirementIntegrationTests(unittest.TestCase):
         if partial == "completed flag":
           saved["candidates"][0]["complete"] = True
         else:
-          self.forgejo.records = [package("application", parent)]
+          self.gitea.records = [package("application", parent)]
           self.server.content.pop(child)
         self.workflow.state.data["cleanup"] = saved
         self.workflow.state.flush()
         before = self.path.read_bytes()
         with self.assertRaisesRegex(ReleaseError, "operator recovery"):
           self.resume()
-        self.assertEqual(self.forgejo.deleted, [])
+        self.assertEqual(self.gitea.deleted, [])
         self.assertEqual(self.path.read_bytes(), before)
 
   def test_alias_only_legacy_inventory_uses_empty_digest_schedule(self):
@@ -404,7 +404,7 @@ class RetirementIntegrationTests(unittest.TestCase):
     self.workflow.state.flush()
     self.resume()
     self.assertEqual(self.workflow.state.data["cleanup"]["retirement"]["order"], [])
-    self.assertEqual(self.forgejo.deleted, [("application", "v0.9.0")])
+    self.assertEqual(self.gitea.deleted, [("application", "v0.9.0")])
 
   def test_validly_bound_but_incomplete_graph_evidence_cannot_override_live_graph(self):
     child = self.server.image()
@@ -417,7 +417,7 @@ class RetirementIntegrationTests(unittest.TestCase):
     self.workflow.state.flush()
     with self.assertRaisesRegex(ReleaseError, "topology differs"):
       self.resume()
-    self.assertEqual(self.forgejo.deleted, [])
+    self.assertEqual(self.gitea.deleted, [])
 
   def test_completed_parent_reappearance_is_a_survivor_not_renewed_authority(self):
     child = self.server.image()
@@ -432,13 +432,13 @@ class RetirementIntegrationTests(unittest.TestCase):
       candidates = self.workflow.state.data.get("cleanup", {}).get("candidates", [])
       if not recreated and any(item.get("version") == parent and item.get("complete") for item in candidates):
         self.server.content[parent] = copy.deepcopy(parent_content)
-        self.forgejo.records.append(package("application", parent))
+        self.gitea.records.append(package("application", parent))
         recreated = True
     with patch.object(self.workflow.state, "flush", side_effect=recreate_after_completion):
       with self.assertRaisesRegex(ReleaseError, "required"):
         apply(self.workflow, self.evidence)
     self.assertTrue(recreated)
-    self.assertEqual(self.forgejo.deleted, [("application", parent)])
+    self.assertEqual(self.gitea.deleted, [("application", parent)])
     self.assertIn(child, self.server.content)
 
   def test_approved_schedule_survives_termination_before_first_delete(self):
@@ -452,7 +452,7 @@ class RetirementIntegrationTests(unittest.TestCase):
     with patch.object(self.workflow.state, "flush", side_effect=persist_then_stop), self.assertRaises(SystemExit):
       apply(self.workflow, self.evidence)
     approved = copy.deepcopy(load(self.path)["cleanup"]["retirement"])
-    self.assertEqual(self.forgejo.deleted, [])
+    self.assertEqual(self.gitea.deleted, [])
     self.resume()
     self.assertEqual(self.workflow.state.data["cleanup"]["retirement"], approved)
     self.assertTrue(self.workflow.state.data["cleanup_complete"])
@@ -471,21 +471,21 @@ class RetirementIntegrationTests(unittest.TestCase):
         before = self.path.read_bytes()
         with self.assertRaises(ReleaseError):
           self.resume()
-        self.assertEqual(self.forgejo.deleted, [])
+        self.assertEqual(self.gitea.deleted, [])
         self.assertEqual(self.path.read_bytes(), before)
 
   def test_inconsistent_absence_evidence_stops_before_dependent_delete(self):
     child = self.server.image()
     parent = self.server.index([{"digest": child}])
     self.inventory([child, parent])
-    original = self.forgejo.get
+    original = self.gitea.get
     def stale_get(path, absent=False):
-      if path == "application:" + parent and ("application", parent) in self.forgejo.deleted:
+      if path == "application:" + parent and ("application", parent) in self.gitea.deleted:
         return package("application", parent)
       return original(path, absent)
-    with patch.object(self.forgejo, "get", side_effect=stale_get), self.assertRaisesRegex(ReleaseError, "not yet absent"):
+    with patch.object(self.gitea, "get", side_effect=stale_get), self.assertRaisesRegex(ReleaseError, "not yet absent"):
       apply(self.workflow, self.evidence)
-    self.assertEqual(self.forgejo.deleted, [("application", parent)])
+    self.assertEqual(self.gitea.deleted, [("application", parent)])
     self.assertIn(child, self.server.content)
     self.resume()
-    self.assertEqual(self.forgejo.deleted, [("application", parent), ("application", child)])
+    self.assertEqual(self.gitea.deleted, [("application", parent), ("application", child)])

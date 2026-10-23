@@ -1,15 +1,18 @@
 """Evidence-gated deletion, with manifests protected before candidate selection."""
 
 import heapq
+import re
 import time
 
 from .core import ReleaseError, canonical, digest, load, older, require
 from .policy import owned_package, release_candidates
 from .oci import immutable, runnable
+from .config import server_version
 
 
 MAX_RETIREMENT_CANDIDATES = 10000
 MAX_RETIREMENT_REFERENCES = 100000
+DIGEST_OWNERSHIP_REASON = "Digest ownership/version cannot be proven"
 
 
 def candidate_projection(inventory):
@@ -121,22 +124,27 @@ def validate_retirement(inventory):
 
 
 def deletion_evidence(path, config):
-  require(path is not None, "Container deletion disabled: no disposable Forgejo verification evidence supplied")
+  require(path is not None, "Container deletion disabled: no disposable Gitea verification evidence supplied")
   evidence = load(path)
-  require(evidence.get("schema") == 1 and evidence.get("origin") == config["forgejo"].rstrip("/") and
-          evidence.get("server_major") == 17 and evidence.get("disposable_repository") != config["repository"] and
-          isinstance(evidence.get("disposable_repository"), str) and evidence.get("operator") and
-          evidence.get("verified_at") and evidence.get("alias_preserves_shared_manifest") is True and
+  require(isinstance(evidence, dict) and evidence.get("schema") == 2 and evidence.get("product") == "gitea" and
+          "server_major" not in evidence and evidence.get("origin") == config["gitea"].rstrip("/") and
+          evidence.get("disposable_repository") != config["repository"] and
+          isinstance(evidence.get("disposable_repository"), str) and
+          re.fullmatch(r"[a-zA-Z0-9_.-]+/[a-zA-Z0-9_.-]+", evidence["disposable_repository"]) and
+          all(isinstance(evidence.get(field), str) and evidence[field].strip() and len(evidence[field]) <= 256
+              for field in ("operator", "verified_at")) and evidence.get("alias_preserves_shared_manifest") is True and
           evidence.get("digest_deletion_is_scoped") is True and
           evidence.get("retained_platforms_pullable") is True,
-          "Deletion evidence is missing required same-server disposable verification results")
+          "Deletion evidence requires fresh schema-2 Gitea same-server disposable verification results")
+  server_version(evidence.get("server_version"))
   return evidence
 
 
 def deletion_environment(workflow, path):
   evidence = deletion_evidence(path, workflow.config)
-  server = workflow.forgejo.get("/api/v1/version")
-  require(str(server.get("version", "")).startswith("17."), "Server version differs from deletion evidence")
+  server = workflow.gitea.get("/api/v1/version")
+  require(isinstance(server, dict), "Invalid Gitea server version response")
+  require(server_version(server.get("version")) == evidence["server_version"], "Server version differs from deletion evidence")
   return evidence
 
 
@@ -180,7 +188,7 @@ def digest_owned(workflow, evidence):
     configurations = runnable(evidence, include_subjects=True)
   except ReleaseError:
     return False
-  source = workflow.config["forgejo"].rstrip("/") + "/" + workflow.config["repository"]
+  source = workflow.config["gitea"].rstrip("/") + "/" + workflow.config["repository"]
   labels = [item.get("config", {}).get("Labels", {}) for item in configurations]
   return bool(labels) and all(isinstance(item, dict) and
     item.get("org.opencontainers.image.source") == source and
@@ -192,7 +200,7 @@ def package_eligibility(workflow, package, resolved, evidence):
   config, state = workflow.config, workflow.state.data
   name, reference = package["name"], package["version"]
   if not owned_package(package, config["repository"], set(state["outputs"])):
-    return False, None
+    return False, "Package is not linked to the configured repository; preserved"
   image = next(image for image in config["images"] if image["name"] == name)
   if reference == "latest" or (image.get("retain_version") and reference == workflow.tag):
     return False, None
@@ -202,7 +210,7 @@ def package_eligibility(workflow, package, resolved, evidence):
     return True, None
   if reference.startswith("sha256:"):
     owned = digest_owned(workflow, evidence)
-    return owned, None if owned else "Digest ownership/version cannot be proven"
+    return owned, None if owned else DIGEST_OWNERSHIP_REASON
   if older(reference, workflow.release_version):
     return True, None
   return False, "Unrecognized version or unfinished external staging reference"
@@ -211,7 +219,7 @@ def package_eligibility(workflow, package, resolved, evidence):
 def package_records(workflow):
   """Collect references before graph traversal, so absence can be reconciled first."""
   records = {}
-  packages = workflow.forgejo.packages()
+  packages = workflow.gitea.packages()
   require(isinstance(packages, list), "Expected package inventory array")
   for package in packages:
     require(isinstance(package, dict), "Invalid package inventory record")
@@ -257,13 +265,14 @@ def survivor_graph(workflow, rows, candidates):
 def skipped_records(rows, protected):
   return [{"name": name, "version": reference, "reason": row["reason"]}
           for (name, reference), row in rows.items() if row["reason"] and
-          (not reference.startswith("sha256:") or row["digest"] not in protected[name])]
+          (row["reason"] != DIGEST_OWNERSHIP_REASON or not reference.startswith("sha256:") or
+           row["digest"] not in protected[name])]
 
 
 def plan(workflow):
   workflow.verify_publication()
   rows = package_inventory(workflow)
-  candidates = release_candidates(workflow.forgejo.releases(), workflow.release_version)
+  candidates = release_candidates(workflow.gitea.releases(), workflow.release_version)
   candidates.extend({"kind": "package", "name": name, "version": reference, "digest": row["digest"]}
                     for (name, reference), row in rows.items() if row["eligible"])
   protected = survivor_graph(workflow, rows, candidates)
@@ -287,7 +296,7 @@ def validate_inventory(workflow, inventory):
       key = (candidate["name"], candidate["version"])
       require(key[0] in workflow.state.data["outputs"], "Cleanup candidate outside configured image inventory")
       if key not in records:
-        require(workflow.forgejo.get(workflow.forgejo.package_path(*key), absent=True) is None,
+        require(workflow.gitea.get(workflow.gitea.package_path(*key), absent=True) is None,
                 "Cleanup candidate missing from complete package inventory")
   rows = package_inventory(workflow, records)
   protected = survivor_graph(workflow, rows, inventory["candidates"])
@@ -372,24 +381,24 @@ def apply(workflow, evidence_path):
     if candidate.get("complete"):
       continue
     if candidate["kind"] == "release":
-      existing = workflow.forgejo.release(candidate["tag"])
+      existing = workflow.gitea.release(candidate["tag"])
       if existing is not None:
         require(existing["id"] == candidate["id"] and not existing.get("draft") and
                 not existing.get("prerelease") and older(existing["tag_name"], workflow.release_version),
                 "Release cleanup candidate changed")
-        workflow.forgejo.delete_release(candidate["id"])
+        workflow.gitea.delete_release(candidate["id"])
     else:
       name, reference = candidate["name"], candidate["version"]
       if reference.startswith("sha256:"):
         require_retired_parents(inventory, candidate, rows)
-      present = workflow.forgejo.get(workflow.forgejo.package_path(name, reference), absent=True)
+      present = workflow.gitea.get(workflow.gitea.package_path(name, reference), absent=True)
       if present is not None:
         require(owned_package(present, workflow.config["repository"], set(workflow.state.data["outputs"])),
                 "Package ownership changed")
         require(workflow.registry.resolve(name, reference) == candidate["digest"], "Cleanup package digest changed")
         require(evidence["alias_preserves_shared_manifest"], "Shared alias deletion is not verified")
-        workflow.forgejo.delete_package(name, reference)
-        require(workflow.forgejo.get(workflow.forgejo.package_path(name, reference), absent=True) is None,
+        workflow.gitea.delete_package(name, reference)
+        require(workflow.gitea.get(workflow.gitea.package_path(name, reference), absent=True) is None,
                 "Deletion outcome is not yet absent; retry cleanup")
     candidate["complete"] = True
     workflow.state.flush()
@@ -424,11 +433,11 @@ def abandon(workflow, run_ids, minimum_age, evidence_path):
       if current is not None:
         require(current == staging["digest"], "Abandoned staging identity conflict")
         workflow.verify_publication()
-        package = workflow.forgejo.get(workflow.forgejo.package_path(name, staging["tag"]), absent=True)
+        package = workflow.gitea.get(workflow.gitea.package_path(name, staging["tag"]), absent=True)
         require(package is None or owned_package(package, workflow.config["repository"],
                 set(workflow.state.data["outputs"])), "Abandoned package association differs")
         if package is not None:
-          workflow.forgejo.delete_package(name, staging["tag"])
+          workflow.gitea.delete_package(name, staging["tag"])
     record["abandoned"] = True
     # Do not erase graph protection: this operation retires aliases, not manifest digests.
     from .core import save

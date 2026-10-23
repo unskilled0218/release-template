@@ -6,7 +6,7 @@ from pathlib import Path
 import sys
 
 from . import __version__
-from .adapters import Forgejo, Registry, Runner, git_identity, preflight
+from .adapters import Gitea, Registry, Runner, git_identity, preflight
 from .cleanup import abandon, apply, plan
 from .config import credentials, read_version, validate
 from .core import ReleaseError, child, load, require
@@ -41,11 +41,11 @@ def main(root, revision=None, argv=None):
     release_version = read_version(config, root, runner, arguments.tag)
     if revision is None:
       revision = runner.run(["git", "rev-parse", "HEAD"]).strip()
-    registry, forgejo = Registry(config, username, token), Forgejo(config, token)
+    registry, gitea = Registry(config, username, token), Gitea(config, token)
     state_path = root / ".release-template" / ("v" + release_version + ".json")
     if arguments.mode != "publish":
       require(state_path.exists(), "Mode requires an existing verified release checkpoint")
-    workflow = Workflow(root, config, release_version, revision, runner, registry, forgejo, commit)
+    workflow = Workflow(root, config, release_version, revision, runner, registry, gitea, commit)
     if arguments.mode in ("publish", "resume"):
       with runner.docker_auth(config["registry"], username, token):
         workflow.publish()

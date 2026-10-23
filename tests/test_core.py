@@ -29,17 +29,17 @@ class CoreTests(unittest.TestCase):
 
   def test_token_default_and_override_never_use_real_home(self):
     with tempfile.TemporaryDirectory() as temporary:
-      path = Path(temporary) / ".config/forgejo/forgejo-token"
+      path = Path(temporary) / ".config/gitea/gitea-token"
       path.parent.mkdir(parents=True)
       path.write_text("fixture-token\n")
       path.chmod(0o600)
-      environment = {"HOME": temporary, "FORGEJO_USERNAME": "fixture"}
+      environment = {"HOME": temporary, "GIT_USERNAME": "fixture"}
       self.assertEqual(credentials(environment), ("fixture", "fixture-token"))
-      for override in (str(path), "~/.config/forgejo/forgejo-token"):
-        self.assertEqual(credentials(environment | {"FORGEJO_TOKEN": override})[1], "fixture-token")
+      for override in (str(path), "~/.config/gitea/gitea-token"):
+        self.assertEqual(credentials(environment | {"GIT_TOKEN": override})[1], "fixture-token")
       for override in ("", "raw-token-value", "~/missing"):
         with self.subTest(override=override), self.assertRaises(ReleaseError):
-          credentials(environment | {"FORGEJO_TOKEN": override})
+          credentials(environment | {"GIT_TOKEN": override})
       path.chmod(0o644)
       with self.assertRaisesRegex(ReleaseError, "private"):
         credentials(environment)
@@ -54,20 +54,20 @@ class CoreTests(unittest.TestCase):
       path = Path(temporary) / "token"
       path.write_text("fixture")
       path.chmod(0o600)
-      environment = {"FORGEJO_TOKEN": str(path), "FORGEJO_USER": "fixture"}
+      environment = {"GIT_TOKEN": str(path), "GIT_USERNAME": "fixture"}
       self.assertEqual(credentials(environment)[0], "fixture")
-      with self.assertRaisesRegex(ReleaseError, "Conflicting"):
-        credentials(environment | {"FORGEJO_USERNAME": "other"})
+      with self.assertRaisesRegex(ReleaseError, "Unsupported"):
+        credentials(environment | {"GIT_USER": "other"})
       with self.assertRaisesRegex(ReleaseError, "login"):
-        credentials({"FORGEJO_TOKEN": str(path)})
+        credentials({"GIT_TOKEN": str(path)})
 
   def test_endpoint_rejects_credentials_redirect_origins_and_production_http(self):
-    for value in ("http://forgejo.invalid", "https://user:pass@forgejo.invalid", "https://forgejo.invalid/api", "https://forgejo.invalid?q=x"):
+    for value in ("http://gitea.invalid", "https://user:pass@gitea.invalid", "https://gitea.invalid/api", "https://gitea.invalid?q=x"):
       with self.subTest(value=value), self.assertRaises(ReleaseError):
         endpoint(value)
     self.assertEqual(endpoint("http://127.0.0.1:8000", True), "http://127.0.0.1:8000")
     with self.assertRaises(ReleaseError):
-      endpoint("http://forgejo.invalid", True)
+      endpoint("http://gitea.invalid", True)
 
   def test_configuration_requires_explicit_names_and_pinned_dependency_adapter(self):
     config = configuration()

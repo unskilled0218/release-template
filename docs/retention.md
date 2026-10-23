@@ -8,11 +8,11 @@
 
 ## Deletion evidence gate
 
-Destructive container cleanup is blocked by default, including staging-alias retirement. No live Forgejo deletion verification was performed for the initial implementation. A mock test or manually setting a Boolean in configuration is not live evidence. An operator must first run the [disposable-server contract checks](verification.md#live-contract-checks) on the same Forgejo 17 server, preserve the actual results, and supply a private JSON attestation via `--deletion-evidence`.
+Destructive container cleanup is blocked by default, including staging-alias retirement. Historical initial implementation records did not verify live Forgejo deletion; they do not establish Gitea compatibility. No live Gitea deletion verification has been performed. A mock test or manually setting a Boolean in configuration is not live evidence. An operator must first run the [disposable-server contract checks](verification.md#live-contract-checks) on the actual Gitea deployment, preserve the actual results, and supply a private JSON attestation via `--deletion-evidence`.
 
-The attestation is a trusted operator input, not a cryptographic proof. Its schema must include `schema: 1`, the exact `origin`, `server_major: 17`, a distinct `disposable_repository`, nonempty `operator` and `verified_at`, and true results for `alias_preserves_shared_manifest`, `digest_deletion_is_scoped`, and `retained_platforms_pullable`. It must accompany retained test logs and identify the actual tested environment. The tool verifies its target binding and the running server's major version; it cannot establish that an operator's attestation is truthful. Reverify after Forgejo/storage changes. No passing attestation is shipped in examples or generated from mock tests for real use.
+The attestation is a trusted operator input, not a cryptographic proof. It requires `schema: 2`, `product: "gitea"`, the exact configured `origin`, an exact full `server_version`, a distinct `disposable_repository` in owner/repository form, nonempty `operator` and `verified_at`, and true results for `alias_preserves_shared_manifest`, `digest_deletion_is_scoped`, and `retained_platforms_pullable`. It must accompany retained test logs and identify the actual tested environment. Versions must be bounded `MAJOR.MINOR.PATCH` with optional prerelease/build suffixes; runtime equality includes those suffixes. Old schema-1, major-only, mixed-product, stale, or malformed evidence cannot enable deletion. The tool checks target/version binding but cannot establish product identity from `/version` alone or prove an attestation truthful. Reverify after Gitea version/build or storage changes. No passing attestation is shipped in examples or generated from mock tests for real use.
 
-Until an authorized disposable environment is available, deliver code/tests with cleanup disabled. The engine must never substitute a production project as a contract-test target.
+Until an authorized disposable environment is available, deliver code/tests with cleanup disabled. The engine must never substitute a production project as a contract-test target. Missing or foreign repository links produce explicit skipped diagnostics and cleanup incomplete. Linking is an operator-controlled whole-package action requiring separate adoption approval; the tool never links or reassigns owner-scoped packages.
 
 ## Candidate selection
 
@@ -53,7 +53,7 @@ Staging tags are `rt-<run-id>-<image>` and are owned by exact checkpoint tag/dig
 Unfinished runs retain manifests needed to resume. Abandoned-run cleanup must be explicitly selected and is not automatic expiration:
 
 ```sh
-FORGEJO_USERNAME=your-login ./scripts/release.sh abandon --tag v2.0.0 --run <abandoned-run-id> --minimum-age-days 30 --deletion-evidence /protected/forgejo-verification.json
+GIT_USERNAME=your-login ./scripts/release.sh abandon --tag v2.0.0 --run <abandoned-run-id> --minimum-age-days 30 --deletion-evidence /protected/gitea-verification.json
 ```
 
 The current release must already be verified. Selected checkpoints must belong to the same repository, be unpublished, not be the current run, be older than the threshold (at least one day), and have complete staging ownership/digests. This command retires selected aliases only, preserves graph protection, and records abandonment. It never deletes raw manifest digests from an abandoned run. Missing inventories, changed digests, and unknown ownership stop the operation. Stop any external publisher of that run first; a timestamp or tag prefix alone never authorizes deletion.

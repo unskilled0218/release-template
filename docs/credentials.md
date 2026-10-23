@@ -6,20 +6,20 @@
 
 ## Token file
 
-The default is `FORGEJO_TOKEN=~/.config/forgejo/forgejo-token`, interpreted as a file-path setting when the variable is absent. A quoted `~/...` expands using the current user's home. An explicit empty value is an error. The file must be readable, user-owned, private (mode 600 or 400), nonempty, and contain one token without embedded whitespace. The tool never creates, changes, or prints it.
+When `GIT_TOKEN` is absent, the default file is `~/.config/gitea/gitea-token`. `GIT_TOKEN` selects a file path, not a token value. A quoted `~/...` expands using the current user's home. An explicit empty value is an error. The file must be readable, user-owned, private (mode 600 or 400), nonempty, and contain one token without embedded whitespace. The tool never creates, copies, moves, changes, or prints it. Read [Gitea migration](gitea-migration.md) before upgrading.
 
-The token needs repository write and package write access to the exact configured target. Set `FORGEJO_USERNAME` to its account login, including for organization-owned packages. `FORGEJO_USER` is a compatibility alias; conflicting values fail. The repository owner is never assumed to be the account login.
+Use Gitea `write:repository` and `write:package` scopes restricted to approved targets where supported. Check the deployed version's Swagger/token documentation for any additional read scope required by version/repository/package endpoints; do not grant blanket administrator access. Package permissions are owner-scoped, not isolated by repository links. Set only `GIT_USERNAME` to the token account login, including for organization-owned packages; this does not set Git author identity. The repository owner is never assumed to be the account login. `GIT_USER`, `GITEA_TOKEN`, `GITEA_USERNAME`, `GITEA_USER`, `FORGEJO_TOKEN`, `FORGEJO_USERNAME`, and `FORGEJO_USER` are rejected whenever present, even empty, before file access. There are no aliases or old-default fallback.
 
 ```sh
-FORGEJO_USERNAME=your-login ./scripts/release.sh publish
-FORGEJO_USERNAME=your-login FORGEJO_TOKEN="$HOME/.config/forgejo/other-token" ./scripts/release.sh resume
+GIT_USERNAME=your-login ./scripts/release.sh publish
+GIT_USERNAME=your-login GIT_TOKEN="$HOME/.config/gitea/other-token" ./scripts/release.sh resume
 ```
 
-Unlike the read-only `home-web` reference, do not inject raw token contents into `FORGEJO_TOKEN`. It selects a file, not a secret value. Keep credentials out of Git, `.env`, Compose, hook arguments, Docker build arguments, image layers, release descriptions, and checkpoints. BuildKit secret files are an explicit separate adapter setting when builds need their own protected credentials.
+Do not inject raw token contents into `GIT_TOKEN`. It selects a file, not a secret value. Keep credentials out of Git, `.env`, Compose, hook arguments, Docker build arguments, image layers, release descriptions, and checkpoints. BuildKit secret files are an explicit separate adapter setting when builds need their own protected credentials.
 
 ## Trust and Docker isolation
 
-Forgejo API and registry reads use Python's default system TLS trust (including its standard `SSL_CERT_FILE`/`SSL_CERT_DIR` configuration). Registry Bearer token challenges must remain on the configured HTTPS origin. HTTP redirects are rejected, so credentials are never forwarded to external storage or token servers. Server setups relying on external blob redirects are deliberately unsupported. Manifest/config reads are bounded; image layers are not downloaded by verification.
+Gitea API and registry reads use Python's default system TLS trust (including its standard `SSL_CERT_FILE`/`SSL_CERT_DIR` configuration). Registry Bearer token challenges must remain on the configured HTTPS origin. HTTP redirects are rejected, so credentials are never forwarded to external storage or token servers. Server setups relying on external blob redirects are deliberately unsupported. Manifest/config reads are bounded; image layers are not downloaded by verification.
 
 Git, the Docker CLI, the daemon, and BuildKit need their own configured TLS/SSH trust. A successful API call does not configure daemon or builder trust. The release tool does not install certificates, disable TLS, change daemon settings, or install emulation. Ask the host administrator to prepare binfmt or native builder nodes when required; no privileged setup runs automatically.
 

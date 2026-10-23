@@ -1,3 +1,3 @@
-"""Versioned, attachment-free Forgejo container releases."""
+"""Versioned, attachment-free Gitea container releases."""
 
-__version__ = "0.1.2"
+__version__ = "0.2.0"

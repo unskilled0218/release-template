@@ -10,12 +10,12 @@
 Use a committed clean `main` checkout, explicit configured origin, and committed semantic version. Follow [installation](installation.md) first. The consumer must ignore `.release-template/`, `.template-operation.lock`, and `.template-transaction/`; release checks these ignore rules without editing them. The stable launcher verifies installed checksums under a destination lock before importing the engine.
 
 ```sh
-FORGEJO_USERNAME=your-login ./scripts/release.sh publish
+GIT_USERNAME=your-login ./scripts/release.sh publish
 # For an explicit version source:
-FORGEJO_USERNAME=your-login ./scripts/release.sh publish --tag v1.2.3
+GIT_USERNAME=your-login ./scripts/release.sh publish --tag v1.2.3
 ```
 
-Before tests, Git fetch/push, registry login, or builds, both normal and recovery paths check Buildx's advertised platforms. Diagnostics identify the builder, advertised platforms, and required targets. This is not a runtime emulation test. The workflow runs project checks, confirms or explicitly pushes source without force, builds every image once into a unique staging reference, verifies immutable image configurations, records outputs, creates/verifies the exact source Git tag, promotes verified digests, creates a text-only Forgejo release, and verifies the complete publication before cleanup.
+Before tests, Git fetch/push, registry login, or builds, both normal and recovery paths check Buildx's advertised platforms. Diagnostics identify the builder, advertised platforms, and required targets. This is not a runtime emulation test. The workflow runs project checks, confirms or explicitly pushes source without force, builds every image once into a unique staging reference, verifies immutable image configurations, records outputs, creates/verifies the exact source Git tag, promotes verified digests, creates a text-only Gitea release, and verifies the complete publication before cleanup.
 
 Descriptions contain schema-bound source, template, image digest, and platform identities. There are no attachment upload calls, image archives, checksum assets, or archive-based recovery checks. Defaults leave `latest` as the only final registry tag; temporary staging tags have a separate lifecycle. Git tags remain versioned. If `retain_version` is explicitly enabled, the current version registry alias is retained too.
 
@@ -24,9 +24,9 @@ Cleanup runs after publication but requires the independent evidence gate in [re
 ## Checkpoints and retries
 
 ```sh
-FORGEJO_USERNAME=your-login ./scripts/release.sh resume --tag v1.2.3
-FORGEJO_USERNAME=your-login ./scripts/release.sh cleanup-plan --tag v1.2.3
-FORGEJO_USERNAME=your-login ./scripts/release.sh cleanup --tag v1.2.3 --deletion-evidence /protected/forgejo-verification.json
+GIT_USERNAME=your-login ./scripts/release.sh resume --tag v1.2.3
+GIT_USERNAME=your-login ./scripts/release.sh cleanup-plan --tag v1.2.3
+GIT_USERNAME=your-login ./scripts/release.sh cleanup --tag v1.2.3 --deletion-evidence /protected/gitea-verification.json
 ```
 
 Ignored `.release-template/v<version>.json` is a versioned checkpoint containing credential-free source/config/template identity, operation IDs, durable intent, immutable prepared digests, exact staging inventories, predecessor aliases, and completion records. Do not discard it after remote mutation or share a state directory between different projects. Keep one authoritative state directory across releases; changing it loses protection for resumable local runs. Retain state and manifests until publication and retirement finish.
