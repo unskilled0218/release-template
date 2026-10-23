@@ -168,6 +168,18 @@ class GiteaHTTPContractTests(unittest.TestCase):
       self.api.delete_package("nested/image", "sha256:abc")
     self.assertTrue(all(request[2] == "token private-fixture-token" for request in self.requests))
 
+  def test_package_link_route_requires_201_and_never_unlinks_or_deletes(self):
+    path = "/api/v1/packages/fixtures/container/nested%2Fimage/-/link/application"
+    self.routes["POST", path] = (201, {})
+    self.api.link_package("nested/image")
+    self.assertEqual(self.requests[0][:3], ("POST", path, "token private-fixture-token"))
+    for status in (200, 204, 401, 403, 404, 409, 500):
+      self.routes["POST", path] = (status, {"message": "private-fixture-token"})
+      with self.subTest(status=status), self.assertRaises(ReleaseError) as caught:
+        self.api.link_package("nested/image")
+      self.assertNotIn("private-fixture-token", str(caught.exception))
+    self.assertTrue(all(request[0] == "POST" and request[1] == path for request in self.requests))
+
   def test_capped_package_pages_are_exhausted_with_container_filter(self):
     path = "/api/v1/packages/fixtures?type=container&page={}\u0026limit=100"
     for page, records in enumerate(([package("application", "v1.0.0")], [package("application", "latest")], []), 1):

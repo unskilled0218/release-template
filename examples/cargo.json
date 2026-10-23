@@ -1,5 +1,6 @@
 {
   "schema": 2,
+  "release_notes": "examples/project-notes.md",
   "gitea": "https://gitea.example.invalid",
   "registry": "gitea.example.invalid",
   "repository": "example/rust-service",

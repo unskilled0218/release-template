@@ -9,8 +9,9 @@ import unittest
 from unittest.mock import patch
 
 from release_template import cli
-from release_template.core import ReleaseError, canonical, digest, load
+from release_template.core import ReleaseError, canonical, digest, load, save
 from release_template.workflow import Workflow
+from release_template.local import LocalImages
 from tests.support import COMMIT, REVISION, FakeGitea, FakeRegistry, FakeRunner, configuration, evidence, package
 
 
@@ -40,6 +41,63 @@ class CLITests(unittest.TestCase):
     self.Registry.assert_not_called()
     self.Gitea.assert_not_called()
     self.assertEqual(self.runner.calls, [])
+
+  def test_verified_publication_finalizes_local_images_despite_remote_cleanup_gate(self):
+    with patch.object(LocalImages, "finalize", return_value=[{"reference": "fixture@digest", "result": "removed"}]) as final:
+      self.assertEqual(self.invoke("publish", "--tag", "v1.0.0"), 1)
+    final.assert_called_once()
+    self.assertIn("cleanup incomplete: Container deletion disabled", self.errors.getvalue())
+    self.assertIn("Local image fixture@digest: removed", self.output.getvalue())
+    self.assertEqual(self.gitea.deleted, [])
+
+  def test_local_failure_preserves_original_remote_cleanup_diagnostic_and_publication(self):
+    with patch.object(LocalImages, "finalize", side_effect=ReleaseError("unavailable local evidence")):
+      self.assertEqual(self.invoke("publish", "--tag", "v1.0.0"), 1)
+    self.assertIn("cleanup incomplete: Container deletion disabled", self.errors.getvalue())
+    self.assertIn("local cleanup incomplete", self.errors.getvalue())
+    self.assertTrue(load(self.root / ".release-template/v1.0.0.json")["published"])
+    self.assertEqual(len(self.gitea.records), 1)
+
+  def test_failed_publication_and_readonly_modes_never_finalize_local_images(self):
+    self.runner.drift = True
+    with patch.object(LocalImages, "finalize") as final:
+      self.assertEqual(self.invoke("publish", "--tag", "v1.0.0"), 1)
+      self.assertEqual(self.invoke("validate"), 0)
+    final.assert_not_called()
+
+  def test_cleanup_plan_never_finalizes_local_images_or_accepts_link_window(self):
+    self.assertEqual(self.invoke("publish", "--tag", "v1.0.0"), 1)
+    with patch.object(LocalImages, "finalize") as final:
+      self.assertEqual(self.invoke("cleanup-plan", "--tag", "v1.0.0"), 0)
+      self.assertEqual(self.invoke("cleanup-plan", "--tag", "v1.0.0", "--package-link-window", "window.json"), 1)
+    final.assert_not_called()
+
+  def test_opted_in_runtime_pull_is_removed_after_publication_and_retry_keeps_baseline(self):
+    from tests.test_local_images import LocalStore, LOCAL_ID
+    store = LocalStore()
+    config = configuration() | {"remove_local_images": True}
+    config["images"][0]["verify"] = ["fixture-verify"]
+    (self.root / "release.json").write_text(json.dumps(config))
+    original = self.runner.run
+    def run(arguments, **kwargs):
+      if arguments == ["fixture-verify"]:
+        inputs = json.loads(kwargs["extra"]["RELEASE_INPUT_JSON"])
+        declaration = inputs["local_images"]
+        store.rows.append({"id": LOCAL_ID, "tags": [], "digests": [inputs["image"]]})
+        save(declaration["journal"], {"schema": 1, "run": declaration["run"], "reference": inputs["image"],
+                                     "observations": {"linux/amd64": LOCAL_ID, "linux/arm64": LOCAL_ID}})
+        return ""
+      return original(arguments, **kwargs)
+    self.runner.run = run
+    with patch("release_template.local.DockerLocal", return_value=store):
+      self.assertEqual(self.invoke("publish", "--tag", "v1.0.0"), 1)
+      baseline = load(self.root / ".release-template/v1.0.0.json")["local_finalization"]["baseline"]
+      self.assertEqual(self.invoke("resume", "--tag", "v1.0.0"), 1)
+    self.assertEqual(len(store.removed), 1)
+    self.assertEqual(store.rows, [])
+    self.assertEqual(load(self.root / ".release-template/v1.0.0.json")["local_finalization"]["baseline"], baseline)
+    self.assertIn("already absent", self.output.getvalue())
+    self.assertIn("cleanup incomplete: Container deletion disabled", self.errors.getvalue())
 
   def test_legacy_and_mixed_configuration_fail_before_credentials_and_clients(self):
     valid = configuration()

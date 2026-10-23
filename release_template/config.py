@@ -47,6 +47,10 @@ def validate(data, root):
   require(re.fullmatch(r"[a-z0-9.-]+(?::[0-9]+)?", data.get("registry", "")), "Invalid registry authority")
   require(urlsplit(data["gitea"]).netloc == data["registry"], "Gitea and registry origins must match")
   require(isinstance(data.get("source_push", False), bool), "source_push must be boolean")
+  require("release_notes" in data, "Add a committed release_notes Markdown path before using this template pin")
+  child(root, data["release_notes"])
+  for flag in ("link_packages", "remove_local_images"):
+    require(isinstance(data.get(flag, False), bool), flag + " must be boolean")
   source = data.get("version", {})
   require(source.get("kind") in ("package", "file", "explicit", "command"), "Unknown version source")
   if source["kind"] in ("package", "file"):

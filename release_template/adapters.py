@@ -66,6 +66,26 @@ class Runner:
           else:
             raise ReleaseError("Source archive contains unsupported special entries")
 
+  def git_blob(self, commit, path, maximum):
+    from .core import child
+    child(self.root, path)
+    tree = self.run(["git", "ls-tree", "-z", commit, "--", path])
+    entries = tree.rstrip("\x00").split("\x00")
+    require(len(entries) == 1 and "\t" in entries[0], "Release notes must be a regular committed file")
+    fields, filename = entries[0].split("\t", 1)
+    entry = fields.split()
+    require(len(entry) == 3 and entry[0] in ("100644", "100755") and entry[1] == "blob" and filename == path,
+            "Release notes must be a regular committed file")
+    oid = entry[2]
+    require(int(self.run(["git", "cat-file", "-s", oid]).strip()) <= maximum, "Release notes exceed size bound")
+    try:
+      result = subprocess.run(["git", "cat-file", "blob", oid], cwd=self.root, env=self.environment,
+                              capture_output=True, timeout=60)
+    except (OSError, subprocess.TimeoutExpired) as exc:
+      raise ReleaseError("Committed release notes unavailable or timed out") from exc
+    require(result.returncode == 0 and len(result.stdout) <= maximum, "Cannot read committed release notes")
+    return result.stdout
+
   @contextmanager
   def docker_auth(self, registry, username, token):
     original = self.environment.copy()
@@ -185,6 +205,10 @@ class Gitea:
 
   def packages(self):
     return self.pages("/api/v1/packages/" + quote(self.owner, safe=""), {"type": "container"})
+
+  def link_package(self, name):
+    path = "/api/v1/packages/" + "/".join(quote(x, safe="") for x in (self.owner, "container", name))
+    self.http.request("POST", path + "/-/link/" + quote(self.repo, safe=""), self.headers, allowed=(201,))
 
   def package_path(self, name, package_version):
     return "/api/v1/packages/" + "/".join(quote(x, safe="") for x in

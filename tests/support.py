@@ -1,5 +1,6 @@
 import copy
 import json
+import hashlib
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
@@ -15,7 +16,7 @@ REVISION = "b" * 40
 
 def configuration():
   return {"schema": 2, "gitea": "https://gitea.invalid", "registry": "gitea.invalid",
-          "repository": "fixtures/application", "source_push": False,
+          "repository": "fixtures/application", "source_push": False, "release_notes": "notes/1.0.0.md",
           "version": {"kind": "explicit"}, "checks": [["check-project"]],
           "images": [{"name": "application", "platforms": ["linux/amd64", "linux/arm64"]}]}
 
@@ -124,6 +125,11 @@ class FakeRunner:
     self.kill_source = False
     self.remote_commit = COMMIT
     self.drift = False
+    self.objects = {}
+
+  def git_blob(self, commit, path, maximum):
+    release_version = Path(path).stem
+    return ("# Release v" + release_version + "\n\nProject updates for this version.\n").encode()
 
   def archive(self, commit, destination):
     if commit != COMMIT:
@@ -153,7 +159,28 @@ class FakeRunner:
       if "refs/heads/main" in arguments:
         return self.remote_commit + "\trefs/heads/main\n"
       requested = [value for value in arguments if value.startswith("refs/tags/") and not value.endswith("^{}")]
-      return "".join(self.tags[tag] + "\t" + tag + "\n" for tag in requested if tag in self.tags)
+      lines = []
+      for tag in requested:
+        if tag in self.tags:
+          oid = self.tags[tag]
+          lines.append(oid + "\t" + tag + "\n")
+          if oid in self.objects:
+            commit = self.objects[oid].splitlines()[0].split()[1]
+            lines.append(commit + "\t" + tag + "^{}\n")
+      return "".join(lines)
+    if arguments[:2] == ["git", "mktag"]:
+      oid = hashlib.sha1(input_text.encode()).hexdigest()
+      self.objects[oid] = input_text
+      return oid + "\n"
+    if arguments[:2] == ["git", "cat-file"]:
+      content = self.objects[arguments[-1]]
+      if arguments[2] == "-t":
+        return "tag\n"
+      if arguments[2] == "-s":
+        return str(len(content.encode()))
+      return content
+    if arguments[:2] == ["git", "fetch"]:
+      return ""
     if arguments[:2] == ["git", "push"]:
       value = arguments[-1]
       if value == "HEAD:refs/heads/main":

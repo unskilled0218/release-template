@@ -5,6 +5,47 @@ import json
 import os
 import re
 import subprocess
+from pathlib import Path
+import tempfile
+
+
+def observe(inputs, platform):
+  declaration = inputs.get("local_images")
+  if declaration is None:
+    return
+  if declaration.get("schema") != 1 or declaration.get("reference") != inputs["image"]:
+    raise ValueError("Local provenance declaration differs")
+  result = subprocess.run(["docker", "image", "inspect", "--platform", platform, "--format", "{{.Id}}", inputs["image"]],
+                          capture_output=True, text=True, timeout=60)
+  identity = result.stdout.strip()
+  if result.returncode != 0 or not re.fullmatch(r"sha256:[0-9a-f]{64}", identity):
+    raise ValueError("Local image identity is unavailable")
+  path = Path(declaration["journal"])
+  value = {"schema": 1, "run": declaration["run"], "reference": inputs["image"], "observations": {}}
+  if path.exists():
+    if path.is_symlink() or path.stat().st_size > 65536:
+      raise ValueError("Invalid local provenance journal")
+    previous = json.loads(path.read_text())
+    if any(previous.get(key) != value[key] for key in ("schema", "run", "reference")):
+      raise ValueError("Local provenance journal differs")
+    value["observations"].update(previous["observations"])
+  value["observations"][platform] = identity
+  descriptor, temporary = tempfile.mkstemp(dir=path.parent, prefix=".local-")
+  try:
+    with os.fdopen(descriptor, "w") as output:
+      os.fchmod(output.fileno(), 0o600)
+      json.dump(value, output)
+      output.flush()
+      os.fsync(output.fileno())
+    os.replace(temporary, path)
+    directory = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+      os.fsync(directory)
+    finally:
+      os.close(directory)
+  finally:
+    if os.path.exists(temporary):
+      os.unlink(temporary)
 
 
 def verify(inputs):
@@ -21,6 +62,8 @@ def verify(inputs):
       result = subprocess.run(command, capture_output=True, text=True, timeout=300)
       if result.returncode != 0:
         raise ValueError("Hello World pull/run failed for " + platform)
+      if command[1] == "pull":
+        observe(inputs, platform)
     if result.stdout != "Hello World\n":
       raise ValueError("Unexpected default-command output for " + platform)
     print(platform + ": Hello World")

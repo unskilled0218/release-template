@@ -4,6 +4,9 @@
   "registry": "git.lan",
   "repository": "dev/container-release-template",
   "source_push": false,
+  "release_notes": "docs/releases/0.2.4.md",
+  "link_packages": true,
+  "remove_local_images": true,
   "version": {"kind": "file", "path": "VERSION"},
   "checks": [["python3", "-B", "-m", "unittest", "discover", "-s", "tests", "-q"]],
   "images": [{

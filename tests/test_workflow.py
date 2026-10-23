@@ -5,7 +5,7 @@ import unittest
 from unittest.mock import patch
 
 from release_template.cleanup import abandon, apply, plan, protected_graph
-from release_template.core import ReleaseError, load
+from release_template.core import ReleaseError, digest, load
 from release_template.policy import description, metadata
 from release_template.workflow import Workflow
 from tests.support import COMMIT, REVISION, FakeGitea, FakeRegistry, FakeRunner, configuration, evidence, package
@@ -23,7 +23,8 @@ class WorkflowTests(unittest.TestCase):
 
   def workflow(self, release_version="1.0.0"):
     self.runner.release_version = release_version
-    return Workflow(self.root, self.config, release_version, REVISION, self.runner, self.registry, self.gitea, COMMIT)
+    config = self.config | {"release_notes": "notes/" + release_version + ".md"}
+    return Workflow(self.root, config, release_version, REVISION, self.runner, self.registry, self.gitea, COMMIT)
 
   def builds(self):
     return [call for call in self.runner.calls if call[:3] == ["docker", "buildx", "build"]]
@@ -31,7 +32,7 @@ class WorkflowTests(unittest.TestCase):
   def test_publish_is_text_only_latest_only_and_resume_does_not_rebuild(self):
     workflow = self.workflow()
     workflow.publish()
-    identity = metadata(self.gitea.release("v1.0.0"))
+    identity = workflow.git.resolve(self.gitea.release("v1.0.0"))
     self.assertEqual(identity["targets"], workflow.targets())
     self.assertEqual(set(workflow.targets()), {"application:latest"})
     self.assertEqual(self.gitea.records[0]["assets"], [])
@@ -110,7 +111,11 @@ class WorkflowTests(unittest.TestCase):
     # Simulate a later authorized publisher that completed a newer release.
     newer_root = self.registry.add("application", "latest", "2.0.0")
     new_identity = old.release_identity() | {"version": "2.0.0", "tag": "v2.0.0", "targets": {"application:latest": newer_root}}
-    self.gitea.publish("v2.0.0", COMMIT, description(new_identity))
+    text = self.runner.git_blob(COMMIT, "notes/2.0.0.md", 65536).decode()
+    new_identity["notes"] = {"path": "notes/2.0.0.md", "digest": digest(text.encode())}
+    oid = old.git.create(new_identity)
+    self.runner.tags["refs/tags/v2.0.0"] = oid
+    self.gitea.publish("v2.0.0", COMMIT, text)
     start = len(self.runner.calls)
     with self.assertRaises(ReleaseError):
       self.workflow().publish()

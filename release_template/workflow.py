@@ -6,12 +6,15 @@ import tempfile
 
 from .adapters import git_identity
 from .core import ReleaseError, canonical, child, digest, image_order, load, promotion_allowed, require
-from .policy import description, metadata, published
+from .policy import published
+from .git import Git
+from .linking import link_packages, verify_links
+from .local import LocalImages
 from .state import State
 
 
 class Workflow:
-  def __init__(self, root, config, release_version, revision, runner, registry, gitea, commit):
+  def __init__(self, root, config, release_version, revision, runner, registry, gitea, commit, link_window=None):
     self.root, self.config = Path(root), config
     self.release_version, self.tag = release_version, "v" + release_version
     self.runner, self.registry, self.gitea, self.commit = runner, registry, gitea, commit
@@ -19,6 +22,21 @@ class Workflow:
                 "commit": commit, "config": digest(canonical(config)), "template": revision}
     self.state = State(self.root / ".release-template" / (self.tag + ".json"), identity)
     self.source = config["gitea"].rstrip("/") + "/" + config["repository"]
+    self.git, self.link_window = Git(runner), link_window
+    self.local = LocalImages(self)
+    self.publication_verified = False
+
+  def freeze_notes(self):
+    path = self.config.get("release_notes")
+    require(path is not None, "Add committed release_notes before publication")
+    text = self.git.notes(self.commit, path, self.release_version)
+    frozen = {"path": path, "digest": digest(text.encode()), "text": text}
+    if "notes" in self.state.data:
+      require(self.state.data["notes"] == frozen, "Frozen release notes changed")
+    else:
+      self.state.data["notes"] = frozen
+      self.state.flush()
+    return frozen
 
   def aliases(self):
     result = {}
@@ -41,15 +59,17 @@ class Workflow:
     return result
 
   def release_identity(self):
-    return {"schema": 1, "version": self.release_version, "tag": self.tag,
+    notes = self.freeze_notes()
+    return {"schema": 2, "version": self.release_version, "tag": self.tag,
             "commit": self.commit, "template": self.state.data["identity"]["template"],
             "repository": self.config["repository"], "targets": self.targets(),
-            "platforms": {image["name"]: image["platforms"] for image in self.config["images"]}}
+            "platforms": {image["name"]: image["platforms"] for image in self.config["images"]},
+            "notes": {"path": notes["path"], "digest": notes["digest"]}}
 
   def snapshot(self):
     if "predecessor" in self.state.data:
       return
-    accepted = published(self.gitea.releases())
+    accepted = published(self.gitea.releases(), self.git.resolve)
     aliases = self.aliases()
     if accepted is None:
       require(all(value is None for value in aliases.values()), "Existing aliases have no recognized predecessor release")
@@ -66,7 +86,7 @@ class Workflow:
     self.state.flush()
 
   def eligibility(self):
-    accepted = published(self.gitea.releases())
+    accepted = published(self.gitea.releases(), self.git.resolve)
     predecessor = self.state.data["predecessor"]
     if accepted is not None:
       require(accepted.get("repository") == self.config["repository"], "Publication repository differs")
@@ -94,17 +114,20 @@ class Workflow:
 
   def tag_source(self):
     self.eligibility()
-    self.state.intent("tag", {"tag": self.tag, "commit": self.commit})
+    identity = self.release_identity()
+    previous = self.state.data["operations"].get("tag")
+    oid = previous["details"]["object"] if previous else self.git.create(identity)
+    require(self.git.inspect(oid, self.tag) == identity, "Recorded annotated tag identity differs")
+    self.state.intent("tag", {"tag": self.tag, "commit": self.commit, "object": oid, "identity": identity})
     destination = "refs/tags/" + self.tag
-    tags = self.runner.run(["git", "ls-remote", "--tags", "origin", destination, destination + "^{}"]).splitlines()
-    if tags:
-      peeled = next((line.split()[0] for line in tags if line.endswith("^{}")), tags[0].split()[0])
-      require(peeled == self.commit, "Remote version tag identifies another commit")
+    expected = {"object": oid, "commit": self.commit, "annotated": True}
+    remote = self.git.remote(self.tag)
+    if remote is None:
+      require(not previous or previous["status"] != "complete", "Confirmed remote tag disappeared")
+      self.runner.run(["git", "push", "origin", oid + ":" + destination])
     else:
-      # Push the captured source directly; existing local tags cannot redirect publication.
-      self.runner.run(["git", "push", "origin", self.commit + ":" + destination])
-      tags = self.runner.run(["git", "ls-remote", "origin", destination]).split()
-      require(tags and tags[0] == self.commit, "Remote Git tag not confirmed")
+      require(remote == expected, "Remote version tag object/identity conflicts")
+    require(self.git.remote(self.tag) == expected, "Remote Git tag not confirmed")
     self.state.complete("tag")
 
   def check_local_tag(self):
@@ -164,7 +187,11 @@ class Workflow:
     if "verify" in image:
       inputs = {"schema": 1, "image": reference + "@" + existing, "commit": self.commit,
                 "version": self.release_version, "platforms": image["platforms"]}
+      declaration = self.local.declare(inputs["image"], image["platforms"])
+      if declaration is not None:
+        inputs["local_images"] = declaration
       self.runner.run(image["verify"], extra={"RELEASE_INPUT_JSON": canonical(inputs).decode()})
+      self.local.observe(declaration)
     self.state.data["outputs"][name] = {"digest": existing}
     self.state.data["staging"][name]["digest"] = existing
     self.state.flush()
@@ -184,22 +211,25 @@ class Workflow:
       self.state.complete("promote:" + alias)
 
   def verify_publication(self):
+    self.publication_verified = False
     self.eligibility()
     require(len(self.state.data["outputs"]) == len(self.config["images"]), "Publication has missing prepared images")
     require(self.aliases() == self.targets(), "Final aliases do not identify the prepared release")
     release = self.gitea.release(self.tag)
     require(release is not None and not release.get("draft") and not release.get("prerelease") and
-            not release.get("assets") and metadata(release) == self.release_identity(), "Text-only release not verified")
+            not release.get("assets") and self.git.resolve(release) == self.release_identity(), "Text-only release not verified")
     for image in self.config["images"]:
       self.registry.verify(image["name"], self.state.data["outputs"][image["name"]]["digest"],
                            image["platforms"], self.commit, self.release_version, self.source)
-    destination = "refs/tags/" + self.tag
-    tags = self.runner.run(["git", "ls-remote", "--tags", "origin", destination, destination + "^{}"]).splitlines()
-    require(tags, "Remote release tag is absent")
-    peeled = next((line.split()[0] for line in tags if line.endswith("^{}")), tags[0].split()[0])
-    require(peeled == self.commit, "Remote release tag source changed")
+    tag = self.state.data["operations"]["tag"]["details"]
+    require(self.git.remote(self.tag) == {"object": tag["object"], "commit": self.commit, "annotated": True},
+            "Remote release tag object changed")
+    verify_links(self)
+    self.publication_verified = True
 
   def publish(self):
+    self.freeze_notes()
+    self.local.start()
     self.snapshot()
     self.eligibility()
     self.check_local_tag()
@@ -219,16 +249,17 @@ class Workflow:
       else:
         self.prepare_image(image)
     self.eligibility()
+    link_packages(self, self.link_window)
     self.tag_source()
     self.promote()
     self.eligibility()
-    body = description(self.release_identity())
+    body = self.state.data["notes"]["text"]
     self.state.intent("release", {"body": body, "tag": self.tag})
     existing = self.gitea.release(self.tag)
     if existing is None:
       self.gitea.publish(self.tag, self.commit, body)
     else:
-      require(metadata(existing) == self.release_identity() and not existing.get("assets") and
+      require(self.git.resolve(existing) == self.release_identity() and not existing.get("assets") and
               not existing.get("draft") and not existing.get("prerelease"), "Existing release conflicts")
     self.verify_publication()
     self.state.complete("release")

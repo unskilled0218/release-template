@@ -19,6 +19,7 @@ def main(root, revision=None, argv=None):
   parser.add_argument("--config", default="release.json")
   parser.add_argument("--tag")
   parser.add_argument("--deletion-evidence", type=Path)
+  parser.add_argument("--package-link-window", type=Path)
   parser.add_argument("--run", action="append", default=[])
   parser.add_argument("--minimum-age-days", type=int, default=30)
   arguments = parser.parse_args(argv)
@@ -26,6 +27,8 @@ def main(root, revision=None, argv=None):
   try:
     root = Path(root).resolve()
     config = validate(load(child(root, arguments.config)), root)
+    require(arguments.package_link_window is None or arguments.mode in ("publish", "resume"),
+            "--package-link-window is only accepted for publish/resume")
     require(not config.get("test_http") or "unittest" in sys.modules,
             "Loopback HTTP is only available to in-process test fixtures")
     if arguments.mode == "validate":
@@ -45,13 +48,31 @@ def main(root, revision=None, argv=None):
     state_path = root / ".release-template" / ("v" + release_version + ".json")
     if arguments.mode != "publish":
       require(state_path.exists(), "Mode requires an existing verified release checkpoint")
-    workflow = Workflow(root, config, release_version, revision, runner, registry, gitea, commit)
+    workflow = Workflow(root, config, release_version, revision, runner, registry, gitea, commit,
+                        arguments.package_link_window)
     if arguments.mode in ("publish", "resume"):
       with runner.docker_auth(config["registry"], username, token):
         workflow.publish()
-      print("Publication verified: v" + release_version)
-      # An absent evidence file blocks cleanup, but never invalidates recorded publication success.
-      apply(workflow, arguments.deletion_evidence)
+        print("Publication verified: v" + release_version)
+        errors = []
+        # Remote deletion authority never governs removal of proven local copies.
+        try:
+          apply(workflow, arguments.deletion_evidence)
+        except (ReleaseError, OSError, KeyError, TypeError, ValueError) as exc:
+          errors.append("Publication succeeded; cleanup incomplete: " +
+                        (str(exc) if isinstance(exc, ReleaseError) else "Remote cleanup input unavailable"))
+        try:
+          outcomes = workflow.local.finalize()
+          for outcome in outcomes:
+            print("Local image " + outcome["reference"] + ": " + outcome["result"])
+          if any(item["result"].startswith("failed:") for item in outcomes):
+            errors.append("Publication succeeded; local cleanup incomplete: one or more removals failed")
+        except (ReleaseError, OSError, KeyError, TypeError, ValueError):
+          errors.append("Publication succeeded; local cleanup incomplete: ownership/evidence unavailable")
+        for message in errors:
+          print(message, file=sys.stderr)
+        if errors:
+          return 1
     elif arguments.mode == "cleanup-plan":
       print(json.dumps(plan(workflow), sort_keys=True, indent=2))
     elif arguments.mode == "cleanup":

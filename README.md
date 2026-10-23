@@ -4,7 +4,7 @@
   - [Use](#use)
   - [Development](#development)
 
-Version 0.2.3 provides pinned, reusable Gitea container release tooling and an opt-in Ubuntu `Hello World` release fixture. It builds once, promotes verified digests, publishes text-only releases, and cleans older versions only after verified publication. Final registry tags default to `latest` only; versioned Git tags remain. Cleanup protects surviving graphs and retires referring manifests before dependencies; publication verifies every runnable platform. Abandonment requires confirmed package and registry absence. Deletion evidence must be within 30 days, with at most 5 minutes of future clock skew; malformed lookup responses stop progress.
+Version 0.2.4 provides pinned Gitea release tooling with committed project-update notes, annotated-tag verification identity, explicit repository package linking, and guarded local image removal. It builds once and promotes verified multi-platform digests. Final registry tags default to `latest`; Git tags remain versioned. Remote deletion stays blocked without fresh deployment-specific evidence. See [release notes](docs/releases/0.2.4.md).
 
 ## Use
 
@@ -12,9 +12,11 @@ Start with [installation and updates](docs/installation.md), then select an [exa
 
 The [Ubuntu release test](docs/ubuntu-release-test.md) is opt-in and targets this project's approved Gitea repository. Do not copy its live configuration into another consumer without reviewing the target and permissions.
 
+Read [image usage](docs/image-usage.md) for authentication and pull/run commands, [package linking](docs/package-linking.md) for the repository Packages tab, and [local image removal](docs/local-images.md) for ownership and retry limits. Consumers must commit their own `release_notes` before publishing with this pin.
+
 The token-file default is `~/.config/git/token`. `GIT_TOKEN` overrides the **path**, not the token value. Set only `GIT_USERNAME` to the token owner's login. Read [Gitea migration](docs/gitea-migration.md) for the breaking schema-2 and credential changes.
 
-No existing project is installed into or migrated automatically. The Ubuntu fixture's live publication, AMD64/ARM64 execution, and same-checkpoint retry passed on Gitea 28.2.0; this does not certify other deployments. Live deletion remains unverified and blocked without fresh same-server, exact-version disposable-test evidence.
+No existing project is installed into or migrated automatically. The historical v0.2.3 Ubuntu fixture passed live publication, AMD64/ARM64 execution, and same-checkpoint retry on Gitea 28.2.0. That result does not verify v0.2.4 or other deployments. Live deletion remains unverified and blocked without fresh same-server, exact-version disposable-test evidence.
 
 ## Development
 
