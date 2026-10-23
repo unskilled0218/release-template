@@ -17,11 +17,17 @@ def observe(inputs, platform):
     raise ValueError("Local provenance declaration differs")
   result = subprocess.run(["docker", "image", "inspect", "--platform", platform, "--format", "{{.Id}}", inputs["image"]],
                           capture_output=True, text=True, timeout=60)
+  platform_id = result.stdout.strip()
+  if result.returncode != 0 or not re.fullmatch(r"sha256:[0-9a-f]{64}", platform_id):
+    raise ValueError("Local image identity is unavailable")
+  # Containerd image ls identifies the index; --platform inspect identifies its member.
+  result = subprocess.run(["docker", "image", "inspect", "--format", "{{.Id}}", inputs["image"]],
+                          capture_output=True, text=True, timeout=60)
   identity = result.stdout.strip()
   if result.returncode != 0 or not re.fullmatch(r"sha256:[0-9a-f]{64}", identity):
-    raise ValueError("Local image identity is unavailable")
+    raise ValueError("Local reference identity is unavailable")
   path = Path(declaration["journal"])
-  value = {"schema": 1, "run": declaration["run"], "reference": inputs["image"], "observations": {}}
+  value = {"schema": 1, "run": declaration["run"], "reference": inputs["image"], "observations": {}, "platform_ids": {}}
   if path.exists():
     if path.is_symlink() or path.stat().st_size > 65536:
       raise ValueError("Invalid local provenance journal")
@@ -29,7 +35,9 @@ def observe(inputs, platform):
     if any(previous.get(key) != value[key] for key in ("schema", "run", "reference")):
       raise ValueError("Local provenance journal differs")
     value["observations"].update(previous["observations"])
+    value["platform_ids"].update(previous.get("platform_ids", {}))
   value["observations"][platform] = identity
+  value["platform_ids"][platform] = platform_id
   descriptor, temporary = tempfile.mkstemp(dir=path.parent, prefix=".local-")
   try:
     with os.fdopen(descriptor, "w") as output:

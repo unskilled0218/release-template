@@ -4,7 +4,7 @@
   - [Use](#use)
   - [Development](#development)
 
-Version 0.2.4 provides pinned Gitea release tooling with committed project-update notes, annotated-tag verification identity, explicit repository package linking, and guarded local image removal. It builds once and promotes verified multi-platform digests. Final registry tags default to `latest`; Git tags remain versioned. Remote deletion stays blocked without fresh deployment-specific evidence. See [release notes](docs/releases/0.2.4.md).
+Version 0.2.5 provides pinned Gitea release tooling with committed project-update notes, annotated-tag verification identity, explicit repository package linking, and guarded local image removal, including containerd index identities and release-owned staging tags. It builds once and promotes verified multi-platform digests. Final registry tags default to `latest`; Git tags remain versioned. Remote deletion stays blocked without fresh deployment-specific evidence. See [release notes](docs/releases/0.2.5.md).
 
 ## Use
 
@@ -16,7 +16,7 @@ Read [image usage](docs/image-usage.md) for authentication and pull/run commands
 
 The token-file default is `~/.config/git/token`. `GIT_TOKEN` overrides the **path**, not the token value. Set only `GIT_USERNAME` to the token owner's login. Read [Gitea migration](docs/gitea-migration.md) for the breaking schema-2 and credential changes.
 
-No existing project is installed into or migrated automatically. The historical v0.2.3 Ubuntu fixture passed live publication, AMD64/ARM64 execution, and same-checkpoint retry on Gitea 28.2.0. That result does not verify v0.2.4 or other deployments. Live deletion remains unverified and blocked without fresh same-server, exact-version disposable-test evidence.
+No existing project is installed into or migrated automatically. Live v0.2.4 passed project-note/tag verification, package visibility, AMD64/ARM64 execution, and no-write retry on Gitea 28.2.0, but safely skipped local removal due to store-identity and staging-reference limits. Version 0.2.5 addresses those cases without rewriting that release. Live deletion remains unverified and blocked without fresh same-server, exact-version disposable-test evidence.
 
 ## Development
 

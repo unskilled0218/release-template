@@ -39,7 +39,17 @@ class LocalStore:
   def remove(self, reference):
     self.removed.append(reference)
     if not self.noop:
-      self.rows = [row for row in self.rows if reference not in row["tags"] + row["digests"]]
+      remaining = []
+      for row in self.rows:
+        if reference not in row["tags"] + row["digests"]:
+          remaining.append(row)
+          continue
+        row = copy.deepcopy(row)
+        row["tags"] = [item for item in row["tags"] if item != reference]
+        row["digests"] = [item for item in row["digests"] if item != reference]
+        if row["tags"] or row["digests"]:
+          remaining.append(row)
+      self.rows = remaining
     if self.lose:
       self.lose = False
       raise SystemExit("Lost removal response")
@@ -259,6 +269,60 @@ class LocalImageTests(unittest.TestCase):
     outcomes = self.workflow.local.finalize()
     self.assertIn("undeclared", outcomes[-1]["result"])
     self.assertEqual(self.store.rows[0]["tags"], ["gitea.invalid/fixtures/application:latest"])
+
+  def containerd_build_and_pull(self):
+    self.workflow.local.start()
+    staging = "gitea.invalid/fixtures/application:rt-" + self.workflow.state.data["run"] + "-application"
+    platforms = self.config["images"][0]["platforms"]
+    self.workflow.local.build_intent(staging, platforms)
+    self.store.rows.append({"id": ROOT, "tags": [staging, REFERENCE], "digests": [REFERENCE]})
+    self.workflow.local.build_observe(staging, ROOT)
+    declaration = self.workflow.local.declare(REFERENCE, platforms)
+    save(declaration["journal"], {"schema": 1, "run": declaration["run"], "reference": REFERENCE,
+      "observations": {platform: ROOT for platform in platforms},
+      "platform_ids": {"linux/amd64": LOCAL_ID, "linux/arm64": PARENT_ID}})
+    self.workflow.local.observe(declaration)
+    self.workflow.state.data["outputs"] = {"application": {"digest": ROOT}}
+    self.workflow.state.data["published"] = True
+    self.workflow.state.flush()
+    self.workflow.publication_verified = True
+    return staging
+
+  def test_containerd_index_and_member_ids_are_distinct_and_owned_staging_untags_first(self):
+    staging = self.containerd_build_and_pull()
+    record = self.workflow.local.record()
+    self.assertNotEqual(record["references"][REFERENCE]["observations"], record["references"][REFERENCE]["platform_ids"])
+    outcomes = self.workflow.local.finalize()
+    self.assertEqual([item["result"] for item in outcomes], ["removed", "removed"])
+    self.assertEqual(self.store.removed, [staging, REFERENCE])
+    self.assertEqual(self.store.rows, [])
+
+  def test_containerd_proven_group_does_not_override_a_shared_user_alias(self):
+    self.containerd_build_and_pull()
+    self.store.rows[0]["tags"].append("other/project:keep")
+    outcomes = self.workflow.local.finalize()
+    self.assertTrue(all("shared" in item["result"] for item in outcomes))
+    self.assertEqual(self.store.removed, [])
+
+  def test_containerd_interruption_after_staging_untag_reconciles_before_index_removal(self):
+    staging = self.containerd_build_and_pull()
+    self.store.lose = True
+    with self.assertRaises(SystemExit):
+      self.workflow.local.finalize()
+    reopened = self.reopen()
+    reopened.local.start()
+    reopened.publication_verified = True
+    outcomes = reopened.local.finalize()
+    self.assertEqual([item["result"] for item in outcomes], ["already absent", "removed"])
+    self.assertEqual(self.store.removed, [staging, REFERENCE])
+
+  def test_unobserved_build_reference_cannot_borrow_pull_ownership(self):
+    staging = self.containerd_build_and_pull()
+    self.workflow.local.record()["references"][staging]["observations"] = {}
+    outcomes = self.workflow.local.finalize()
+    self.assertIn("uncertain", outcomes[0]["result"])
+    self.assertIn("shared", outcomes[1]["result"])
+    self.assertEqual(self.store.removed, [])
 
 
 class DockerLocalBoundaryTests(unittest.TestCase):

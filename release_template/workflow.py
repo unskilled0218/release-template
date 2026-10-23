@@ -161,6 +161,7 @@ class Workflow:
         if "build" in image:
           self.runner.run(image["build"], extra=environment)
         else:
+          self.local.build_intent(reference + ":" + staging_tag, image["platforms"])
           arguments = ["docker", "buildx", "build", "--platform", ",".join(image["platforms"]),
                        "--provenance=false", "--metadata-file", str(metadata_path), "--push",
                        "--tag", reference + ":" + staging_tag,
@@ -181,6 +182,7 @@ class Workflow:
     previous = self.state.data["outputs"].get(name)
     require(previous is None or previous["digest"] == existing, "Prepared image identity changed")
     self.registry.verify(name, existing, image["platforms"], self.commit, self.release_version, self.source)
+    self.local.build_observe(reference + ":" + staging_tag, existing)
     if metadata_path.exists():
       build_metadata = load(metadata_path)
       require(build_metadata.get("containerimage.digest") == existing, "Build metadata differs from staging digest")

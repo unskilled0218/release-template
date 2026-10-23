@@ -39,6 +39,7 @@ class UbuntuHelloTests(unittest.TestCase):
       declaration = {"schema": 1, "run": "fixture-run", "reference": IMAGE, "journal": str(journal)}
       identity = "sha256:" + "b" * 64
       results = [subprocess.CompletedProcess([], 0, "pulled\n"), subprocess.CompletedProcess([], 0, identity + "\n"),
+                 subprocess.CompletedProcess([], 0, identity + "\n"),
                  subprocess.CompletedProcess([], 0, "Hello World\n")] * 2
       with patch.object(HOOK.subprocess, "run", side_effect=results), contextlib.redirect_stdout(io.StringIO()):
         HOOK.verify(self.inputs() | {"local_images": declaration})
@@ -46,6 +47,7 @@ class UbuntuHelloTests(unittest.TestCase):
       self.assertEqual(value["run"], "fixture-run")
       self.assertEqual(value["reference"], IMAGE)
       self.assertEqual(value["observations"], {"linux/amd64": identity, "linux/arm64": identity})
+      self.assertEqual(value["platform_ids"], {"linux/amd64": identity, "linux/arm64": identity})
       self.assertEqual(journal.stat().st_mode & 0o777, 0o600)
 
   def test_mutable_image_and_incomplete_platforms_fail_before_docker(self):
