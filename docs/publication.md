@@ -17,6 +17,8 @@ GIT_USERNAME=your-login ./scripts/release.sh publish --tag v1.2.3
 
 Before tests, Git fetch/push, registry login, or builds, both normal and recovery paths check Buildx's advertised platforms. Diagnostics identify the builder, advertised platforms, and required targets. This is not a runtime emulation test. The workflow runs project checks, confirms or explicitly pushes source without force, builds every image once into a unique staging reference, verifies immutable image configurations, records outputs, creates/verifies the exact source Git tag, promotes verified digests, creates a text-only Gitea release, and verifies the complete publication before cleanup.
 
+For host-side AMD64/ARM64 emulation installation, builder bootstrap, and runtime checks, see [platform preparation](platform-preparation.md). An authorized administrator performs privileged setup separately from release execution.
+
 Descriptions contain schema-bound source, template, image digest, and platform identities. There are no attachment upload calls, image archives, checksum assets, or archive-based recovery checks. Defaults leave `latest` as the only final registry tag; temporary staging tags have a separate lifecycle. Git tags remain versioned. If `retain_version` is explicitly enabled, the current version registry alias is retained too.
 
 Cleanup runs after publication but requires the independent evidence gate in [retention safety](retention.md). Without evidence, publication remains recorded as successful and the command returns nonzero with “Publication succeeded; cleanup incomplete”. Do not repeatedly publish merely to satisfy cleanup; provide approved evidence and use cleanup-only mode.
