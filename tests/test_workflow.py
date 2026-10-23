@@ -406,7 +406,8 @@ class WorkflowTests(unittest.TestCase):
     self.registry.aliases["application", "v0.9.0"] = old_digest
     self.forgejo.package_records = [package("application", old_digest), package("application", "v0.9.0")]
     current.state.data["cleanup"] = plan(current)
-    self.assertEqual(current.state.data["cleanup"]["candidates"][1]["version"], old_digest)
+    candidates = current.state.data["cleanup"]["candidates"]
+    candidates.sort(key=lambda item: 0 if item.get("version") == old_digest else 1)
     apply(current, evidence_path)
     packages = [item for item in self.forgejo.deleted if item[0] == "package"]
     self.assertEqual(packages, [("package", "application", "v0.9.0"), ("package", "application", old_digest)])
@@ -417,17 +418,18 @@ class WorkflowTests(unittest.TestCase):
     self.registry.aliases.pop(("application", "unlisted"))
     self.forgejo.package_records = [package("application", first), package("application", old_digest)]
     current.state.data["cleanup"] = plan(current)
+    first, protected_digest = [key[1] for key in current.state.data["cleanup"]["retirement"]["order"]]
     original = self.forgejo.delete_package
     def introduce_alias(name, reference):
       original(name, reference)
       if reference == first:
-        self.registry.aliases["application", "v0.9.0"] = old_digest
+        self.registry.aliases["application", "v0.9.0"] = protected_digest
         self.forgejo.package_records.append(package("application", "v0.9.0"))
     with patch.object(self.forgejo, "delete_package", side_effect=introduce_alias):
       with self.assertRaisesRegex(ReleaseError, "required"):
         apply(current, evidence_path)
     self.assertIn(("package", "application", first), self.forgejo.deleted)
-    self.assertNotIn(("package", "application", old_digest), self.forgejo.deleted)
+    self.assertNotIn(("package", "application", protected_digest), self.forgejo.deleted)
     self.assertTrue(next(item for item in current.state.data["cleanup"]["candidates"] if item.get("version") == first)["complete"])
 
   def test_changed_pending_alias_stops_before_any_deletion(self):

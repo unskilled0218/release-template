@@ -3,6 +3,7 @@
 - [Retention safety](#retention-safety)
   - [Deletion evidence gate](#deletion-evidence-gate)
   - [Candidate selection](#candidate-selection)
+  - [Retirement schedule](#retirement-schedule)
   - [Staging and abandoned runs](#staging-and-abandoned-runs)
 
 ## Deletion evidence gate
@@ -26,6 +27,24 @@ Preserving a reference also preserves its complete reachable manifest graph. Inv
 Saved inventories do not gain authority from fresh policy eligibility. Every live reference without an exact matching pending candidate protects its graph, including a newly introduced older stable alias or a recreated completed record. Cleanup never silently adds these references to its candidate list. Before any saved-plan deletion and between operations, fresh evidence revalidates pending identities and survivor protection; newly protected candidates stop with cleanup incomplete. Authorized aliases retire before their backing digests even if the saved inventory has a different order. Matching-identity old-shaped inventories receive these checks; cross-revision checkpoint adoption is not supported.
 
 After a failed deletion, publication remains successful, cleanup returns nonzero, and the persisted candidate inventory supports idempotent retry. Confirmed target absence is safe; authorization/connectivity errors are not absence. Current images are reverified after cleanup. Historical packages/releases and attachments are not a rollback archive: once removed, version-pinned consumers may no longer pull old versions. Git tags remain but do not restore registry availability.
+
+## Retirement schedule
+
+Version 0.1.2 retires authorized referring manifests before their candidate dependencies, not in package listing order. Membership and subject reachability both count, including transitive paths through manifests without package records. Every candidate parent must retire before a shared child. Image names scope graph keys, so identical digests in different image namespaces do not merge authority. Aliases still retire before raw digests. Ineligible artifact/attestation roots remain protected, not reclassified to make scheduling easier.
+
+The cleanup inventory contains nested `retirement` metadata with these fields:
+
+- `schema`: `1`, independent of the unchanged outer checkpoint schema.
+- `run`: the exact cleanup run ID.
+- `graphs`: records containing `key: [image_name, digest]` and sorted `reachable` immutable manifest digests, including the root and transitive dependencies. Every raw digest candidate has exactly one record.
+- `order`: referring-manifest-first topological order of those stable keys, with deterministic image/digest tie-breaking for independent nodes.
+- `fingerprint`: SHA-256 of canonical JSON containing `run`, `graphs`, and sorted immutable candidate projections. Package projections contain kind/name/version/digest; release projections contain kind/id/tag. Mutable completion flags are excluded, so progress does not change approval.
+
+Read-only planning returns this proposed metadata without writing it. Apply durably saves the approved candidate inventory and schedule together before any deletion, including earlier alias/release deletions. Unknown schemas, missing/duplicate nodes, cycles, altered identities, or inconsistent order/fingerprint stop deletion. Limits are 10,000 candidates and 100,000 total stored reachability references; oversized inputs stop rather than truncate. Metadata is local checkpoint evidence, not a signature or a substitute for current ownership checks.
+
+Retries preserve the schedule and reconcile exact candidate absence against fresh package inventory and the scoped API before graph traversal of remaining records. Successful package deletion is confirmed absent before completion is flushed. A lost response can therefore complete an already absent operation without another DELETE or fetching its retired parent graph. Inconsistent listings, authorization/connectivity failures, or unreadable live graphs stop progress. Every live pending graph is fetched again and must match approved reachability; preserved-reference and unfinished-run protection is still refreshed between operations. A recreated completed parent or a newly introduced unscheduled root protects its graph and can stop a pending dependency deletion. Saved topology never grants new deletion authority.
+
+An intact matching-identity old-shaped inventory without `retirement` may acquire a schedule only when all raw candidates are still present with full validated evidence and none is marked complete. Alias-only inventories can use an empty schedule. Missing/completed raw candidates or broken pending graphs without an approved schedule require explicit operator recovery; the tool does not infer past order, reconstruct deleted content, erase checkpoints, or rewrite identity. Cross-revision adoption remains unsupported, even though the outer checkpoint schema remains 1.
 
 ## Staging and abandoned runs
 

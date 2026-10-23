@@ -1,10 +1,123 @@
 """Evidence-gated deletion, with manifests protected before candidate selection."""
 
+import heapq
 import time
 
-from .core import ReleaseError, load, older, require
+from .core import ReleaseError, canonical, digest, load, older, require
 from .policy import owned_package, release_candidates
-from .oci import runnable
+from .oci import immutable, runnable
+
+
+MAX_RETIREMENT_CANDIDATES = 10000
+MAX_RETIREMENT_REFERENCES = 100000
+
+
+def candidate_projection(inventory):
+  """Completion is progress, not part of the immutable deletion authority."""
+  require(isinstance(inventory, dict) and inventory.get("schema") == 1 and
+          isinstance(inventory.get("run"), str) and inventory["run"], "Invalid cleanup inventory")
+  candidates = inventory.get("candidates")
+  require(isinstance(candidates, list) and len(candidates) <= MAX_RETIREMENT_CANDIDATES,
+          "Cleanup candidate inventory exceeds safety bound or is malformed")
+  identities, keys = [], set()
+  for item in candidates:
+    require(isinstance(item, dict) and isinstance(item.get("complete", False), bool), "Invalid cleanup candidate")
+    if item.get("kind") == "package":
+      require(all(isinstance(item.get(field), str) and item[field] for field in ("name", "version", "digest")),
+              "Invalid package candidate identity")
+      immutable(item["digest"])
+      require(not item["version"].startswith("sha256:") or item["version"] == item["digest"],
+              "Raw candidate reference differs from its digest")
+      identity = {field: item[field] for field in ("kind", "name", "version", "digest")}
+      key = ("package", item["name"], item["version"])
+    else:
+      require(item.get("kind") == "release" and type(item.get("id")) is int and
+              isinstance(item.get("tag"), str) and item["tag"], "Invalid release candidate identity")
+      identity = {field: item[field] for field in ("kind", "id", "tag")}
+      key = ("release", item["id"])
+    require(key not in keys, "Duplicate cleanup candidate")
+    keys.add(key)
+    identities.append(identity)
+  return sorted(identities, key=canonical)
+
+
+def raw_candidates(inventory):
+  return {(item["name"], item["digest"]): item for item in inventory["candidates"]
+          if item["kind"] == "package" and item["version"].startswith("sha256:")}
+
+
+def retirement_order(graphs):
+  """Referring candidates retire before all candidate dependencies, per image."""
+  require(isinstance(graphs, dict) and len(graphs) <= MAX_RETIREMENT_CANDIDATES, "Invalid retirement graphs")
+  by_name, references = {}, 0
+  for key, reachable in graphs.items():
+    require(isinstance(key, tuple) and len(key) == 2 and isinstance(key[0], str) and key[0],
+            "Invalid retirement candidate key")
+    immutable(key[1])
+    require(isinstance(reachable, (set, list, tuple)) and key[1] in reachable, "Missing retirement root evidence")
+    references += len(reachable)
+    require(references <= MAX_RETIREMENT_REFERENCES, "Retirement graph exceeds safety bound")
+    for reference in reachable:
+      immutable(reference)
+    require(len(reachable) == len(set(reachable)), "Duplicate retirement reachability evidence")
+    by_name.setdefault(key[0], {})[key[1]] = key
+  edges, incoming = {}, dict.fromkeys(graphs, 0)
+  for key, reachable in graphs.items():
+    edges[key] = {by_name[key[0]][reference] for reference in reachable
+                  if reference != key[1] and reference in by_name[key[0]]}
+    for dependency in edges[key]:
+      incoming[dependency] += 1
+  ready = [key for key, count in incoming.items() if count == 0]
+  heapq.heapify(ready)
+  result = []
+  while ready:
+    key = heapq.heappop(ready)
+    result.append(key)
+    for dependency in sorted(edges[key]):
+      incoming[dependency] -= 1
+      if incoming[dependency] == 0:
+        heapq.heappush(ready, dependency)
+  require(len(result) == len(graphs), "Retirement dependency cycle")
+  return result
+
+
+def retirement_fingerprint(inventory, graphs):
+  return digest(canonical({"run": inventory["run"], "candidates": candidate_projection(inventory), "graphs": graphs}))
+
+
+def make_retirement(inventory, rows):
+  candidate_projection(inventory)
+  graphs = {}
+  for key in raw_candidates(inventory):
+    require(key in rows, "Legacy cleanup is partial or uncertain; explicit operator recovery required")
+    graphs[key] = set(rows[key]["graph"])
+  order = retirement_order(graphs)
+  records = [{"key": list(key), "reachable": sorted(graphs[key])} for key in sorted(graphs)]
+  return {"schema": 1, "run": inventory["run"], "fingerprint": retirement_fingerprint(inventory, records),
+          "graphs": records, "order": [list(key) for key in order]}
+
+
+def validate_retirement(inventory):
+  candidate_projection(inventory)
+  metadata = inventory.get("retirement")
+  require(isinstance(metadata, dict) and set(metadata) == {"schema", "run", "fingerprint", "graphs", "order"} and
+          metadata["schema"] == 1 and metadata["run"] == inventory["run"], "Invalid or unsupported retirement metadata")
+  records = metadata["graphs"]
+  require(isinstance(records, list) and len(records) <= MAX_RETIREMENT_CANDIDATES, "Invalid retirement graph inventory")
+  graphs = {}
+  for record in records:
+    require(isinstance(record, dict) and set(record) == {"key", "reachable"} and
+            isinstance(record["key"], list) and len(record["key"]) == 2 and
+            all(isinstance(value, str) for value in record["key"]) and
+            isinstance(record["reachable"], list), "Invalid retirement graph record")
+    key = tuple(record["key"])
+    require(key not in graphs, "Duplicate retirement candidate key")
+    graphs[key] = record["reachable"]
+  require(set(graphs) == set(raw_candidates(inventory)), "Retirement candidate coverage differs")
+  order = retirement_order(graphs)
+  require(metadata["order"] == [list(key) for key in order], "Retirement order differs from dependency evidence")
+  require(metadata["fingerprint"] == retirement_fingerprint(inventory, records), "Retirement fingerprint differs")
+  return graphs
 
 
 def deletion_evidence(path, config):
@@ -95,9 +208,9 @@ def package_eligibility(workflow, package, resolved, evidence):
   return False, "Unrecognized version or unfinished external staging reference"
 
 
-def package_inventory(workflow):
-  """Resolve all same-name references, including records outside deletion authority."""
-  rows, graphs = {}, {}
+def package_records(workflow):
+  """Collect references before graph traversal, so absence can be reconciled first."""
+  records = {}
   packages = workflow.forgejo.packages()
   require(isinstance(packages, list), "Expected package inventory array")
   for package in packages:
@@ -107,7 +220,17 @@ def package_inventory(workflow):
     name, reference = package["name"], package.get("version")
     require(isinstance(reference, str) and reference, "Invalid package reference")
     key = (name, reference)
-    require(key not in rows, "Duplicate package inventory reference")
+    require(key not in records, "Duplicate package inventory reference")
+    records[key] = package
+  return records
+
+
+def package_inventory(workflow, records=None):
+  """Resolve all same-name references, including records outside deletion authority."""
+  rows, graphs = {}, {}
+  records = package_records(workflow) if records is None else records
+  for key, package in records.items():
+    name, reference = key
     resolved = workflow.registry.resolve(name, reference)
     require(resolved is not None, "Preserved package reference has no registry identity")
     if (name, resolved) not in graphs:
@@ -148,13 +271,25 @@ def plan(workflow):
                 not item["version"].startswith("sha256:") or item["digest"] not in protected[item["name"]]]
   # Unknown digest roots remain visible even though they protect their own graph.
   skipped = skipped_records(rows, protected_graph(workflow))
-  return {"schema": 1, "run": workflow.state.data["run"], "candidates": candidates, "skipped": skipped}
+  inventory = {"schema": 1, "run": workflow.state.data["run"], "candidates": candidates, "skipped": skipped}
+  inventory["retirement"] = make_retirement(inventory, rows)
+  return inventory
 
 
 def validate_inventory(workflow, inventory):
+  candidate_projection(inventory)
   require(inventory.get("schema") == 1 and inventory["run"] == workflow.state.data["run"],
           "Cleanup belongs to another run or schema")
-  rows = package_inventory(workflow)
+  snapshots = validate_retirement(inventory) if "retirement" in inventory else None
+  records = package_records(workflow)
+  for candidate in inventory["candidates"]:
+    if candidate["kind"] == "package":
+      key = (candidate["name"], candidate["version"])
+      require(key[0] in workflow.state.data["outputs"], "Cleanup candidate outside configured image inventory")
+      if key not in records:
+        require(workflow.forgejo.get(workflow.forgejo.package_path(*key), absent=True) is None,
+                "Cleanup candidate missing from complete package inventory")
+  rows = package_inventory(workflow, records)
   protected = survivor_graph(workflow, rows, inventory["candidates"])
   keys = set()
   for candidate in inventory["candidates"]:
@@ -167,14 +302,50 @@ def validate_inventory(workflow, inventory):
     if candidate.get("complete"):
       continue
     row = rows.get(key)
+    if snapshots is not None and key in snapshots and row is not None:
+      require(set(row["graph"]) == set(snapshots[key]), "Live retirement topology differs from approved evidence")
     if row is None:
-      require(workflow.forgejo.get(workflow.forgejo.package_path(*key), absent=True) is None,
-              "Cleanup candidate missing from complete package inventory")
       continue
     require(row["digest"] == candidate["digest"] and row["eligible"], "Cleanup package identity/eligibility changed")
     require(not key[1].startswith("sha256:") or candidate["digest"] not in protected[key[0]],
             "Digest is now required by a retained, surviving, or resumable image")
   return rows
+
+
+def ensure_retirement(workflow, inventory):
+  candidate_projection(inventory)
+  if "retirement" in inventory:
+    validate_retirement(inventory)
+    return
+  require(not any(item.get("complete") for item in raw_candidates(inventory).values()),
+          "Legacy cleanup is partial or uncertain; explicit operator recovery required")
+  try:
+    rows = validate_inventory(workflow, inventory)
+    inventory["retirement"] = make_retirement(inventory, rows)
+  except ReleaseError as exc:
+    raise ReleaseError("Legacy cleanup cannot establish retirement evidence: " + str(exc) +
+                       "; explicit operator recovery required") from exc
+  workflow.state.flush()
+
+
+def reconcile_absence(workflow, inventory, rows):
+  changed = False
+  for item in inventory["candidates"]:
+    if item["kind"] == "package" and not item.get("complete") and (item["name"], item["version"]) not in rows:
+      item["complete"] = True
+      changed = True
+  if changed:
+    workflow.state.flush()
+
+
+def require_retired_parents(inventory, candidate, rows):
+  key = (candidate["name"], candidate["digest"])
+  candidates = raw_candidates(inventory)
+  for graph in inventory["retirement"]["graphs"]:
+    parent = tuple(graph["key"])
+    if parent != key and parent[0] == key[0] and key[1] in graph["reachable"]:
+      require(candidates[parent].get("complete") and parent not in rows,
+              "Referring manifest has not reached confirmed retirement")
 
 
 def apply(workflow, evidence_path):
@@ -184,16 +355,22 @@ def apply(workflow, evidence_path):
     workflow.state.data["cleanup"] = plan(workflow)
     workflow.state.flush()
   inventory = workflow.state.data["cleanup"]
-  validate_inventory(workflow, inventory)
+  ensure_retirement(workflow, inventory)
+  rows = validate_inventory(workflow, inventory)
+  reconcile_absence(workflow, inventory, rows)
   # Retire aliases before their backing digest, regardless of saved inventory order.
+  positions = {tuple(key): index for index, key in enumerate(inventory["retirement"]["order"])}
   ordered = sorted(inventory["candidates"], key=lambda item:
-    2 if item["kind"] == "package" and item["version"].startswith("sha256:") else
-    0 if item["kind"] == "package" else 1)
+    (2, positions[item["name"], item["digest"]]) if item["kind"] == "package" and item["version"].startswith("sha256:") else
+    (0, 0) if item["kind"] == "package" else (1, 0))
   for candidate in ordered:
     if candidate.get("complete"):
       continue
     workflow.verify_publication()
-    validate_inventory(workflow, inventory)
+    rows = validate_inventory(workflow, inventory)
+    reconcile_absence(workflow, inventory, rows)
+    if candidate.get("complete"):
+      continue
     if candidate["kind"] == "release":
       existing = workflow.forgejo.release(candidate["tag"])
       if existing is not None:
@@ -203,6 +380,8 @@ def apply(workflow, evidence_path):
         workflow.forgejo.delete_release(candidate["id"])
     else:
       name, reference = candidate["name"], candidate["version"]
+      if reference.startswith("sha256:"):
+        require_retired_parents(inventory, candidate, rows)
       present = workflow.forgejo.get(workflow.forgejo.package_path(name, reference), absent=True)
       if present is not None:
         require(owned_package(present, workflow.config["repository"], set(workflow.state.data["outputs"])),
@@ -210,6 +389,8 @@ def apply(workflow, evidence_path):
         require(workflow.registry.resolve(name, reference) == candidate["digest"], "Cleanup package digest changed")
         require(evidence["alias_preserves_shared_manifest"], "Shared alias deletion is not verified")
         workflow.forgejo.delete_package(name, reference)
+        require(workflow.forgejo.get(workflow.forgejo.package_path(name, reference), absent=True) is None,
+                "Deletion outcome is not yet absent; retry cleanup")
     candidate["complete"] = True
     workflow.state.flush()
   workflow.verify_publication()
