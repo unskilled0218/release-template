@@ -16,7 +16,7 @@ Read [image usage](docs/image-usage.md) for authentication and pull/run commands
 
 The token-file default is `~/.config/git/token`. `GIT_TOKEN` overrides the **path**, not the token value. Set only `GIT_USERNAME` to the token owner's login. Read [Gitea migration](docs/gitea-migration.md) for the breaking schema-2 and credential changes.
 
-No existing project is installed into or migrated automatically. Live v0.2.4 passed project-note/tag verification, package visibility, AMD64/ARM64 execution, and no-write retry on Gitea 28.2.0, but safely skipped local removal due to store-identity and staging-reference limits. Version 0.2.5 addresses those cases without rewriting that release. Live deletion remains unverified and blocked without fresh same-server, exact-version disposable-test evidence.
+No existing project is installed into or migrated automatically. Live v0.2.5 passed project-note/tag verification, repository package visibility, AMD64/ARM64 execution, no-write retry, and guarded local removal on Gitea 28.2.0/Docker 29.9.2. It preserves the earlier v0.2.3/v0.2.4 history and pre-existing local images. Live remote deletion remains unverified and blocked without fresh same-server, exact-version disposable-test evidence.
 
 ## Development
 
