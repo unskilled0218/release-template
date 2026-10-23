@@ -29,13 +29,13 @@ class CoreTests(unittest.TestCase):
 
   def test_token_default_and_override_never_use_real_home(self):
     with tempfile.TemporaryDirectory() as temporary:
-      path = Path(temporary) / ".config/gitea/gitea-token"
+      path = Path(temporary) / ".config/git/token"
       path.parent.mkdir(parents=True)
       path.write_text("fixture-token\n")
       path.chmod(0o600)
       environment = {"HOME": temporary, "GIT_USERNAME": "fixture"}
       self.assertEqual(credentials(environment), ("fixture", "fixture-token"))
-      for override in (str(path), "~/.config/gitea/gitea-token"):
+      for override in (str(path), "~/.config/git/token"):
         self.assertEqual(credentials(environment | {"GIT_TOKEN": override})[1], "fixture-token")
       for override in ("", "raw-token-value", "~/missing"):
         with self.subTest(override=override), self.assertRaises(ReleaseError):

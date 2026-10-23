@@ -107,7 +107,7 @@ def credentials(environment=None):
   username = environment.get("GIT_USERNAME")
   require(isinstance(username, str) and re.fullmatch(r"[a-zA-Z0-9_.-]+", username),
           "Set GIT_USERNAME to the token owner's login; no username alias or owner fallback is supported")
-  configured = environment.get("GIT_TOKEN", "~/.config/gitea/gitea-token")
+  configured = environment.get("GIT_TOKEN", "~/.config/git/token")
   require(isinstance(configured, str) and configured, "GIT_TOKEN must select a nonempty token-file path")
   home = environment.get("HOME", str(Path.home()))
   require(not configured.startswith("~") or configured == "~" or configured.startswith("~/"),

@@ -27,7 +27,7 @@ Use the [complete examples](../examples/) and credential-free `./scripts/release
 
 ## Credentials and package authority
 
-The former default `~/.config/forgejo/forgejo-token` and `FORGEJO_*` settings are retired. The only supported settings are `GIT_TOKEN` (protected token-file path) and `GIT_USERNAME` (explicit authentication account, not Git author). The new default path is `~/.config/gitea/gitea-token`. An explicit empty path/login fails. `GIT_USER`, `GITEA_TOKEN`, `GITEA_USERNAME`, `GITEA_USER`, `FORGEJO_TOKEN`, `FORGEJO_USERNAME`, and `FORGEJO_USER` fail whenever present, including empty values, before file access. Remove these settings from the release environment; do not retain them as aliases.
+The former default `~/.config/forgejo/forgejo-token` and `FORGEJO_*` settings are retired. The only supported settings are `GIT_TOKEN` (protected token-file path) and `GIT_USERNAME` (explicit authentication account, not Git author). The new default path is `~/.config/git/token`. An explicit empty path/login fails. `GIT_USER`, `GITEA_TOKEN`, `GITEA_USERNAME`, `GITEA_USER`, `FORGEJO_TOKEN`, `FORGEJO_USERNAME`, and `FORGEJO_USER` fail whenever present, including empty values, before file access. Remove these settings from the release environment; do not retain them as aliases.
 
 ```sh
 GIT_USERNAME=your-login GIT_TOKEN="$HOME/.config/gitea/approved-token" ./scripts/release.sh publish

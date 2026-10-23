@@ -6,7 +6,7 @@
 
 ## Token file
 
-When `GIT_TOKEN` is absent, the default file is `~/.config/gitea/gitea-token`. `GIT_TOKEN` selects a file path, not a token value. A quoted `~/...` expands using the current user's home. An explicit empty value is an error. The file must be readable, user-owned, private (mode 600 or 400), nonempty, and contain one token without embedded whitespace. The tool never creates, copies, moves, changes, or prints it. Read [Gitea migration](gitea-migration.md) before upgrading.
+When `GIT_TOKEN` is absent, the default file is `~/.config/git/token`. `GIT_TOKEN` selects a file path, not a token value. A quoted `~/...` expands using the current user's home. An explicit empty value is an error. The file must be readable, user-owned, private (mode 600 or 400), nonempty, and contain one token without embedded whitespace. The tool never creates, copies, moves, changes, or prints it. Read [Gitea migration](gitea-migration.md) before upgrading.
 
 Use Gitea `write:repository` and `write:package` scopes restricted to approved targets where supported. Check the deployed version's Swagger/token documentation for any additional read scope required by version/repository/package endpoints; do not grant blanket administrator access. Package permissions are owner-scoped, not isolated by repository links. Set only `GIT_USERNAME` to the token account login, including for organization-owned packages; this does not set Git author identity. The repository owner is never assumed to be the account login. `GIT_USER`, `GITEA_TOKEN`, `GITEA_USERNAME`, `GITEA_USER`, `FORGEJO_TOKEN`, `FORGEJO_USERNAME`, and `FORGEJO_USER` are rejected whenever present, even empty, before file access. There are no aliases or old-default fallback.
 

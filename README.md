@@ -10,7 +10,7 @@ Version 0.2.0 provides pinned, reusable Gitea container release tooling. It buil
 
 Start with [installation and updates](docs/installation.md), then select an [example configuration](examples/) and read [configuration and hooks](docs/configuration.md), [credentials and TLS](docs/credentials.md), [publication and recovery](docs/publication.md), and [retention safety](docs/retention.md).
 
-The token-file default is `~/.config/gitea/gitea-token`. `GIT_TOKEN` overrides the **path**, not the token value. Set only `GIT_USERNAME` to the token owner's login. Read [Gitea migration](docs/gitea-migration.md) for the breaking schema-2 and credential changes.
+The token-file default is `~/.config/git/token`. `GIT_TOKEN` overrides the **path**, not the token value. Set only `GIT_USERNAME` to the token owner's login. Read [Gitea migration](docs/gitea-migration.md) for the breaking schema-2 and credential changes.
 
 No existing project is installed into or migrated automatically. Live Gitea/Docker publication and deletion remain unverified. Destructive container cleanup is blocked unless an operator supplies fresh Gitea same-server, exact-version disposable-test evidence.
 
