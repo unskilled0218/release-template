@@ -39,12 +39,18 @@ def association(workflow, name, required_version=None):
 
 def window(workflow, name, path, now=None):
   try:
-    return read_window(workflow, name, path, now)
+    authority = read_window(workflow, name, path)
+    active_window(authority, now)
+    server = workflow.gitea.get("/api/v1/version")
+    require(isinstance(server, dict) and server_version(server.get("version")) ==
+            server_version(authority["scope"]["server_version"]), "Package-link window server version differs")
+    active_window(authority, now)
+    return authority
   except (OSError, ValueError, KeyError, TypeError) as exc:
     raise ReleaseError("Invalid or unavailable package-link window") from exc
 
 
-def read_window(workflow, name, path, now=None):
+def read_window(workflow, name, path):
   require(path is not None, "Package linking requires an operator-enforced --package-link-window")
   with Path(path).open("rb") as source:
     data = source.read(65537)
@@ -70,17 +76,25 @@ def read_window(workflow, name, path, now=None):
           name in value["packages"] and set(value["packages"]) <= names, "Package-link window names differ")
   for field in ("operator", "exclusion_procedure"):
     require(isinstance(value[field], str) and 0 < len(value[field].strip()) <= 2048, "Unconfirmed writer exclusion procedure")
+  window_interval(value)
+  return {"digest": digest(canonical(value)), "scope": value}
+
+
+def window_interval(value):
+  """Validate UTC bounds without reading a file, querying a server, or consulting the clock."""
   times = []
   for field in ("starts_at", "expires_at"):
     require(isinstance(value[field], str) and re.fullmatch(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z", value[field]),
             "Package-link window requires UTC-second timestamps")
     times.append(datetime.fromisoformat(value[field]).replace(tzinfo=timezone.utc).timestamp())
+  require(0 < times[1] - times[0] <= 86400, "Package-link window duration is invalid")
+  return times
+
+
+def active_window(authority, now=None):
+  starts, expires = window_interval(authority["scope"])
   now = time.time() if now is None else now
-  require(times[0] <= now < times[1] and 0 < times[1] - times[0] <= 86400, "Package-link window expired or invalid")
-  server = workflow.gitea.get("/api/v1/version")
-  require(isinstance(server, dict) and server_version(server.get("version")) == server_version(value["server_version"]),
-          "Package-link window server version differs")
-  return {"digest": digest(canonical(value)), "scope": value}
+  require(starts <= now < expires, "Package-link window expired or invalid")
 
 
 def link_packages(workflow, path=None):
@@ -98,12 +112,12 @@ def link_packages(workflow, path=None):
     required = None if workflow.state.data.get("published") else staging["tag"]
     if association(workflow, name, required) is None:
       authority = window(workflow, name, path)
-      workflow.state.data.setdefault("link_windows", {}).setdefault(name, []).append(authority)
-      workflow.state.flush()
-      # The second read narrows stale evidence; only actual operator exclusion closes the race.
-      window(workflow, name, path)
+      # Only actual operator exclusion closes the race between association lookup and POST.
       if association(workflow, name, required) is None:
-        window(workflow, name, path)
+        workflow.state.data.setdefault("link_windows", {}).setdefault(name, []).append(authority)
+        workflow.state.flush()
+        # All blocking validation/persistence precedes this pure dispatch-time decision.
+        active_window(authority)
         workflow.gitea.link_package(name)
     require(association(workflow, name) == workflow.config["repository"], "Package linking was not confirmed")
     workflow.state.complete(operation)

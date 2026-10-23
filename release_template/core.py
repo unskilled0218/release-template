@@ -5,7 +5,7 @@ import json
 import os
 import re
 import tempfile
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 
 class ReleaseError(Exception):
@@ -84,6 +84,13 @@ def atomic_bytes(path, data, mode=0o600):
 
 def save(path, value):
   atomic_bytes(path, canonical(value) + b"\n")
+
+
+def git_path(name):
+  """Validate an exact committed path without consulting the current filesystem."""
+  require(isinstance(name, str) and name and not PurePosixPath(name).is_absolute() and
+          ".." not in PurePosixPath(name).parts and "\x00" not in name, "Invalid committed Git path")
+  return name
 
 
 def child(root, name):

@@ -2,9 +2,8 @@
 
 import json
 import re
-from pathlib import PurePosixPath
 
-from .core import ReleaseError, canonical, older, require, version
+from .core import ReleaseError, canonical, git_path, older, require, version
 
 
 MARKER = "\nRelease identity:\n"
@@ -52,9 +51,7 @@ def validate_identity(value, tag):
     require(reference == targets[alias.split(":", 1)[0] + ":latest"], "Contradictory image digests")
   notes = value["notes"]
   require(isinstance(notes, dict) and set(notes) == {"path", "digest"}, "Invalid notes binding")
-  path = notes["path"]
-  require(isinstance(path, str) and path and not PurePosixPath(path).is_absolute() and
-          ".." not in PurePosixPath(path).parts and "\x00" not in path, "Invalid notes path")
+  git_path(notes["path"])
   require(isinstance(notes["digest"], str) and re.fullmatch(r"sha256:[0-9a-f]{64}", notes["digest"]), "Invalid notes digest")
   return value
 

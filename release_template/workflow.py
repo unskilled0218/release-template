@@ -1,6 +1,7 @@
 """Forward-only publication orchestration over durable operations."""
 
 import json
+import re
 from pathlib import Path
 import tempfile
 
@@ -116,7 +117,19 @@ class Workflow:
     self.eligibility()
     identity = self.release_identity()
     previous = self.state.data["operations"].get("tag")
-    oid = previous["details"]["object"] if previous else self.git.create(identity)
+    if previous is not None:
+      require(isinstance(previous, dict) and set(previous) == {"id", "status", "details"} and
+              isinstance(previous["id"], str) and re.fullmatch(r"[0-9a-f]{32}", previous["id"]) and
+              previous.get("status") in ("pending", "complete") and
+              isinstance(previous.get("details"), dict), "Malformed recorded tag intent")
+      details = previous["details"]
+      require(set(details) == {"tag", "commit", "object", "identity"} and details["tag"] == self.tag and
+              details["commit"] == self.commit and details["identity"] == identity and
+              isinstance(details["object"], str) and re.fullmatch(r"[0-9a-f]{40}", details["object"]),
+              "Recorded tag intent conflicts with publication identity")
+    # A checkpoint ID is not a Git GC root. Recreate the same deterministic bytes before inspection.
+    oid = self.git.create(identity)
+    require(previous is None or previous["details"]["object"] == oid, "Recreated tag object differs from recorded intent")
     require(self.git.inspect(oid, self.tag) == identity, "Recorded annotated tag identity differs")
     self.state.intent("tag", {"tag": self.tag, "commit": self.commit, "object": oid, "identity": identity})
     destination = "refs/tags/" + self.tag

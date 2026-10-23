@@ -4,7 +4,7 @@
   - [Use](#use)
   - [Development](#development)
 
-Version 0.2.5 provides pinned Gitea release tooling with committed project-update notes, annotated-tag verification identity, explicit repository package linking, and guarded local image removal, including containerd index identities and release-owned staging tags. It builds once and promotes verified multi-platform digests. Final registry tags default to `latest`; Git tags remain versioned. Remote deletion stays blocked without fresh deployment-specific evidence. See [release notes](docs/releases/0.2.5.md).
+Version 0.2.6 provides pinned Gitea release tooling with committed project notes, exact annotated-tag recovery after Git pruning, dispatch-time package-link authority, and guarded local image removal. Historical notes are verified from their captured commit, independent of current checkout layout. It builds once and promotes verified multi-platform digests. Remote deletion stays blocked without fresh deployment-specific evidence. See [release notes](docs/releases/0.2.6.md).
 
 ## Use
 
@@ -16,7 +16,7 @@ Read [image usage](docs/image-usage.md) for authentication and pull/run commands
 
 The token-file default is `~/.config/git/token`. `GIT_TOKEN` overrides the **path**, not the token value. Set only `GIT_USERNAME` to the token owner's login. Read [Gitea migration](docs/gitea-migration.md) for the breaking schema-2 and credential changes.
 
-No existing project is installed into or migrated automatically. Live v0.2.5 passed project-note/tag verification, repository package visibility, AMD64/ARM64 execution, no-write retry, and guarded local removal on Gitea 28.2.0/Docker 29.9.2. It preserves the earlier v0.2.3/v0.2.4 history and pre-existing local images. Live remote deletion remains unverified and blocked without fresh same-server, exact-version disposable-test evidence.
+No existing project is installed into or migrated automatically. Historical live v0.2.5 passed project-note/tag verification, repository package visibility, AMD64/ARM64 execution, no-write retry, and guarded local removal on Gitea 28.2.0/Docker 29.9.2. That result does not verify v0.2.6, which has local-only verification. Earlier release history and pre-existing local images remain preserved; live remote deletion stays unverified and evidence-gated.
 
 ## Development
 

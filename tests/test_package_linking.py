@@ -9,7 +9,7 @@ import unittest
 from unittest.mock import patch
 
 from release_template.adapters import Gitea
-from release_template.core import ReleaseError, canonical, load
+from release_template.core import ReleaseError, canonical, digest, load
 from release_template.linking import association, link_packages, verify_links, window
 from release_template.workflow import Workflow
 from tests.support import COMMIT, REVISION, FakeGitea, FakeRegistry, FakeRunner, configuration, package
@@ -105,14 +105,171 @@ class PackageLinkTests(unittest.TestCase):
       link_packages(self.workflow)
 
   def test_window_expiry_immediately_before_post_stops_mutation(self):
-    original = window
-    calls = []
-    def expire(workflow, name, path):
-      calls.append(name)
-      return original(workflow, name, path, now=0 if len(calls) == 3 else None)
-    with patch("release_template.linking.window", side_effect=expire), self.assertRaises(ReleaseError):
-      link_packages(self.workflow, self.path)
+    expires = datetime.fromisoformat(self.authority["expires_at"]).timestamp()
+    clock = [expires - 1]
+    original = self.api.get
+    def get(path, absent=False):
+      result = original(path, absent=absent)
+      if path == "/api/v1/version":
+        clock[0] = expires
+      return result
+    with patch("release_template.linking.time.time", side_effect=lambda: clock[0]), patch.object(self.api, "get", side_effect=get):
+      with self.assertRaises(ReleaseError):
+        link_packages(self.workflow, self.path)
     self.assertEqual(self.api.links, [])
+    self.assertEqual(load(self.workflow.state.path)["operations"]["link:application"]["status"], "pending")
+
+  def test_expiry_during_final_association_lookup_stops_post(self):
+    expires = datetime.fromisoformat(self.authority["expires_at"]).timestamp()
+    clock = [expires - 1]
+    original = self.api.get
+    version_seen = [False]
+    def get(path, absent=False):
+      result = original(path, absent=absent)
+      if path == "/api/v1/version":
+        version_seen[0] = True
+      elif version_seen[0]:
+        clock[0] = expires
+      return result
+    with patch("release_template.linking.time.time", side_effect=lambda: clock[0]), patch.object(self.api, "get", side_effect=get):
+      with self.assertRaises(ReleaseError):
+        link_packages(self.workflow, self.path)
+    self.assertEqual(self.api.links, [])
+
+  def test_window_validation_rechecks_time_after_version_lookup(self):
+    expires = datetime.fromisoformat(self.authority["expires_at"]).timestamp()
+    clock = [expires - 1]
+    original = self.api.get
+    def get(path, absent=False):
+      result = original(path, absent=absent)
+      if path == "/api/v1/version":
+        clock[0] = expires
+      return result
+    with patch("release_template.linking.time.time", side_effect=lambda: clock[0]), patch.object(self.api, "get", side_effect=get):
+      with self.assertRaises(ReleaseError):
+        window(self.workflow, "application", self.path)
+
+  def test_expiry_during_authority_flush_stops_post(self):
+    expires = datetime.fromisoformat(self.authority["expires_at"]).timestamp()
+    clock = [expires - 1]
+    original = self.workflow.state.flush
+    def flush():
+      original()
+      if self.workflow.state.data.get("link_windows"):
+        clock[0] = expires
+    with patch("release_template.linking.time.time", side_effect=lambda: clock[0]), patch.object(self.workflow.state, "flush", side_effect=flush):
+      with self.assertRaises(ReleaseError):
+        link_packages(self.workflow, self.path)
+    self.assertEqual(self.api.links, [])
+    self.assertEqual(load(self.workflow.state.path)["operations"]["link:application"]["status"], "pending")
+
+  def test_authority_snapshot_is_used_even_if_file_is_replaced_during_validation(self):
+    original = self.api.get
+    first = copy.deepcopy(self.authority)
+    def get(path, absent=False):
+      if path == "/api/v1/version":
+        self.path.write_text(json.dumps(first | {"operator": "replacement operator", "repository": "fixtures/other"}))
+      return original(path, absent=absent)
+    with patch.object(self.api, "get", side_effect=get):
+      link_packages(self.workflow, self.path)
+    self.assertEqual(self.api.links, ["application"])
+    evidence = load(self.workflow.state.path)["link_windows"]["application"]
+    self.assertEqual(evidence, [{"digest": digest(canonical(first)), "scope": first}])
+
+  def test_replacement_file_cannot_renew_expired_captured_authority(self):
+    expires = datetime.fromisoformat(self.authority["expires_at"]).timestamp()
+    clock = [expires - 1]
+    original = self.workflow.state.flush
+    def flush():
+      original()
+      if self.workflow.state.data.get("link_windows"):
+        renewed = self.authority | {"expires_at": datetime.fromtimestamp(expires + 600, timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")}
+        self.path.write_text(json.dumps(renewed))
+        clock[0] = expires
+    with patch("release_template.linking.time.time", side_effect=lambda: clock[0]), patch.object(self.workflow.state, "flush", side_effect=flush):
+      with self.assertRaises(ReleaseError):
+        link_packages(self.workflow, self.path)
+    self.assertEqual(self.api.links, [])
+    before = load(self.workflow.state.path)["operations"]["link:application"]["details"]
+    with patch("release_template.linking.time.time", side_effect=lambda: clock[0]):
+      link_packages(self.reopen(), self.path)
+    self.assertEqual(self.api.links, ["application"])
+    self.assertEqual(load(self.workflow.state.path)["operations"]["link:application"]["details"], before)
+
+  def test_authority_start_is_inclusive_and_expiry_exclusive(self):
+    starts = datetime.fromisoformat(self.authority["starts_at"]).timestamp()
+    expires = datetime.fromisoformat(self.authority["expires_at"]).timestamp()
+    self.assertEqual(window(self.workflow, "application", self.path, now=starts)["scope"], self.authority)
+    self.assertEqual(window(self.workflow, "application", self.path, now=expires - 0.001)["scope"], self.authority)
+    for now in (starts - 0.001, expires, expires + 1):
+      with self.subTest(now=now), self.assertRaises(ReleaseError):
+        window(self.workflow, "application", self.path, now=now)
+
+  def test_valid_dispatch_can_be_confirmed_after_expiry_without_rollback(self):
+    expires = datetime.fromisoformat(self.authority["expires_at"]).timestamp()
+    clock = [expires - 1]
+    original = self.api.link_package
+    def link(name):
+      original(name)
+      clock[0] = expires + 1
+    with patch("release_template.linking.time.time", side_effect=lambda: clock[0]), patch.object(self.api, "link_package", side_effect=link):
+      link_packages(self.workflow, self.path)
+    self.assertEqual(self.api.links, ["application"])
+    self.assertEqual(self.api.deleted, [])
+    self.assertEqual(load(self.workflow.state.path)["operations"]["link:application"]["status"], "complete")
+
+  def test_lost_response_after_valid_dispatch_and_expiry_reconciles_without_authority(self):
+    expires = datetime.fromisoformat(self.authority["expires_at"]).timestamp()
+    clock = [expires - 1]
+    original = self.api.link_package
+    def link(name):
+      original(name)
+      clock[0] = expires + 1
+      raise SystemExit("Lost response after valid dispatch")
+    with patch("release_template.linking.time.time", side_effect=lambda: clock[0]), patch.object(self.api, "link_package", side_effect=link):
+      with self.assertRaises(SystemExit):
+        link_packages(self.workflow, self.path)
+    self.path.unlink()
+    with patch("release_template.linking.time.time", side_effect=lambda: clock[0]):
+      link_packages(self.reopen())
+    self.assertEqual(self.api.links, ["application"])
+    self.assertEqual(load(self.workflow.state.path)["operations"]["link:application"]["status"], "complete")
+
+  def test_expired_dispatch_stops_later_publication_writes_and_retry_reuses_build(self):
+    self.workflow.state.data["outputs"] = {}
+    self.workflow.state.data["staging"] = {}
+    self.workflow.state.flush()
+    self.api.package_records = []
+    original_add = self.registry.add
+    def add(name, tag, *args, **kwargs):
+      root = original_add(name, tag, *args, **kwargs)
+      self.api.package_records.append(package(name, tag) | {"repository": None})
+      return root
+    self.registry.add = add
+    expires = datetime.fromisoformat(self.authority["expires_at"]).timestamp()
+    clock = [expires - 1]
+    original_flush = self.workflow.state.flush
+    def flush():
+      original_flush()
+      if self.workflow.state.data.get("link_windows"):
+        clock[0] = expires
+    with patch("release_template.linking.time.time", side_effect=lambda: clock[0]), patch.object(self.workflow.state, "flush", side_effect=flush):
+      with self.assertRaises(ReleaseError):
+        self.workflow.publish()
+    self.assertEqual(self.api.links, [])
+    self.assertEqual(self.runner.tags, {})
+    self.assertIsNone(self.registry.resolve("application", "latest"))
+    self.assertEqual(self.api.records, [])
+    pending = load(self.workflow.state.path)
+    self.assertEqual(pending["operations"]["link:application"]["status"], "pending")
+    renewed = self.authority | {"expires_at": datetime.fromtimestamp(expires + 600, timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")}
+    self.path.write_text(json.dumps(renewed))
+    with patch("release_template.linking.time.time", side_effect=lambda: clock[0]):
+      self.reopen().publish()
+    self.assertEqual(sum(call[:3] == ["docker", "buildx", "build"] for call in self.runner.calls), 1)
+    self.assertEqual(self.api.links, ["application"])
+    self.assertEqual(len(self.api.records), 1)
+    self.assertEqual(load(self.workflow.state.path)["identity"], pending["identity"])
 
   def test_final_lookup_detects_foreign_change_without_post(self):
     original = association

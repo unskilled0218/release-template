@@ -67,9 +67,9 @@ class Runner:
             raise ReleaseError("Source archive contains unsupported special entries")
 
   def git_blob(self, commit, path, maximum):
-    from .core import child
-    child(self.root, path)
-    tree = self.run(["git", "ls-tree", "-z", commit, "--", path])
+    from .core import git_path
+    git_path(path)
+    tree = self.run(["git", "--literal-pathspecs", "ls-tree", "-z", commit, "--", path])
     entries = tree.rstrip("\x00").split("\x00")
     require(len(entries) == 1 and "\t" in entries[0], "Release notes must be a regular committed file")
     fields, filename = entries[0].split("\t", 1)
