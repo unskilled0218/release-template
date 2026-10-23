@@ -4,11 +4,13 @@
   - [Use](#use)
   - [Development](#development)
 
-Version 0.2.2 provides pinned, reusable Gitea container release tooling. It builds once, promotes verified digests, publishes text-only releases, and cleans older versions only after verified publication. Final registry tags default to `latest` only; versioned Git tags remain. Cleanup protects surviving graphs and retires referring manifests before dependencies; publication verifies every runnable platform. Abandonment requires confirmed package and registry absence. Deletion evidence must be within 30 days, with at most 5 minutes of future clock skew; malformed lookup responses stop progress.
+Version 0.2.3 provides pinned, reusable Gitea container release tooling and an opt-in Ubuntu `Hello World` release fixture. It builds once, promotes verified digests, publishes text-only releases, and cleans older versions only after verified publication. Final registry tags default to `latest` only; versioned Git tags remain. Cleanup protects surviving graphs and retires referring manifests before dependencies; publication verifies every runnable platform. Abandonment requires confirmed package and registry absence. Deletion evidence must be within 30 days, with at most 5 minutes of future clock skew; malformed lookup responses stop progress.
 
 ## Use
 
 Start with [installation and updates](docs/installation.md), then select an [example configuration](examples/) and read [configuration and hooks](docs/configuration.md), [credentials and TLS](docs/credentials.md), [publication and recovery](docs/publication.md), and [retention safety](docs/retention.md).
+
+The [Ubuntu release test](docs/ubuntu-release-test.md) is opt-in and targets this project's approved Gitea repository. Do not copy its live configuration into another consumer without reviewing the target and permissions.
 
 The token-file default is `~/.config/git/token`. `GIT_TOKEN` overrides the **path**, not the token value. Set only `GIT_USERNAME` to the token owner's login. Read [Gitea migration](docs/gitea-migration.md) for the breaking schema-2 and credential changes.
 

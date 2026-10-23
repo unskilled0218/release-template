@@ -1,0 +1,16 @@
+{
+  "schema": 2,
+  "gitea": "https://git.lan",
+  "registry": "git.lan",
+  "repository": "dev/container-release-template",
+  "source_push": false,
+  "version": {"kind": "file", "path": "VERSION"},
+  "checks": [["python3", "-B", "-m", "unittest", "discover", "-s", "tests", "-q"]],
+  "images": [{
+    "name": "container-release-template-hello",
+    "platforms": ["linux/amd64", "linux/arm64"],
+    "context": "examples/ubuntu-hello",
+    "dockerfile": "examples/ubuntu-hello/Dockerfile",
+    "verify": ["python3", "-B", "examples/ubuntu-hello/verify.py"]
+  }]
+}
