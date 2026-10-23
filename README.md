@@ -14,7 +14,7 @@ The [Ubuntu release test](docs/ubuntu-release-test.md) is opt-in and targets thi
 
 The token-file default is `~/.config/git/token`. `GIT_TOKEN` overrides the **path**, not the token value. Set only `GIT_USERNAME` to the token owner's login. Read [Gitea migration](docs/gitea-migration.md) for the breaking schema-2 and credential changes.
 
-No existing project is installed into or migrated automatically. Live Gitea/Docker publication and deletion remain unverified. Destructive container cleanup is blocked unless an operator supplies fresh Gitea same-server, exact-version disposable-test evidence.
+No existing project is installed into or migrated automatically. The Ubuntu fixture's live publication, AMD64/ARM64 execution, and same-checkpoint retry passed on Gitea 28.2.0; this does not certify other deployments. Live deletion remains unverified and blocked without fresh same-server, exact-version disposable-test evidence.
 
 ## Development
 

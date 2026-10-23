@@ -1,0 +1,56 @@
+{
+  "date": "2026-10-23",
+  "repository": "dev/container-release-template",
+  "server_version": "28.2.0",
+  "configured_login": "dev",
+  "version": "0.2.3",
+  "source_commit": "e096c05d760c156fd0641d3ae906937c942476c2",
+  "template_revision": "e096c05d760c156fd0641d3ae906937c942476c2",
+  "launcher_mode": "source checkout; not vendored installation",
+  "run": "56d55584c3ac4546917a82b631b0055b",
+  "image": "git.lan/dev/container-release-template-hello",
+  "root_digest": "sha256:a7aa21103ec639854ff02d29668e61b85c22b24fb92c7f5cddf7a52e2fa1a8fd",
+  "ubuntu_base_index_digest": "sha256:68ee22004a9109b44973313b02ff7b1de250f1de0f5ecb628d73f579aaff33ac",
+  "release_id": 1,
+  "release_url": "https://git.lan/dev/container-release-template/releases/tag/v0.2.3",
+  "staging_tag": "rt-56d55584c3ac4546917a82b631b0055b-container-release-template-hello",
+  "final_alias": "latest",
+  "version_alias_present": false,
+  "runtime": [
+    {
+      "platform": "linux/amd64",
+      "manifest_digest": "sha256:523e0b3a9747a4bc0aa42733f5c9955480c0bc21b9a62ac306a86cccb49302f5",
+      "stdout": "Hello World\n",
+      "exit": 0
+    },
+    {
+      "platform": "linux/arm64",
+      "manifest_digest": "sha256:3325bac0c66bddc88da782a1b1253b71e0e6a0a416a37df978afdb422c236042",
+      "stdout": "Hello World\n",
+      "exit": 0
+    }
+  ],
+  "phases": {
+    "publish": {"exit": 1, "builds": 1, "promotions": 1, "seconds": 47.470},
+    "resume": {"exit": 1, "builds": 0, "promotions": 0, "seconds": 2.388},
+    "cleanup-plan": {"exit": 0, "builds": 0, "promotions": 0, "seconds": 1.417},
+    "cleanup": {"exit": 1, "builds": 0, "promotions": 0, "seconds": 0.638}
+  },
+  "expected_gate_error": "Publication succeeded; cleanup incomplete: Container deletion disabled: no disposable Gitea verification evidence supplied",
+  "cleanup_plan_candidates": 0,
+  "cleanup_plan_skipped": 4,
+  "cleanup_skip_reason": "Package is not linked to the configured repository; preserved",
+  "checkpoint_unchanged_on_resume": true,
+  "checkpoint_unchanged_on_blocked_cleanup": true,
+  "publication_verified": true,
+  "deletion_verified": false,
+  "tools": {
+    "python": "3.12.3",
+    "git": "2.43.0",
+    "docker_client": "29.9.2",
+    "docker_server": "29.9.2",
+    "buildx": "0.38.1",
+    "buildkit": "0.34.0",
+    "docker_context": "default"
+  }
+}

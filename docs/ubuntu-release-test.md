@@ -5,6 +5,7 @@
   - [Prepare the source and platforms](#prepare-the-source-and-platforms)
   - [Publish and verify](#publish-and-verify)
   - [Retry and cleanup](#retry-and-cleanup)
+  - [Observed result](#observed-result)
 
 ## Scope and approval
 
@@ -25,6 +26,8 @@ For build-once evidence, a private external Docker wrapper may record only enume
 ## Publish and verify
 
 After the approved fixture commit reaches remote `main`, run from the matching clean checkout:
+
+The commands below describe the recorded `v0.2.3` experiment at source `e096c05d760c156fd0641d3ae906937c942476c2`. Do not republish that tag from a later documentation/results commit. Retry uses the preserved matching checkout and checkpoint; a new experiment requires a separately committed, approved unused version rather than rewriting the old tag or state.
 
 ```sh
 GIT_USERNAME=dev ./scripts/release.sh validate --config examples/ubuntu-hello/release.json
@@ -48,3 +51,9 @@ GIT_USERNAME=dev ./scripts/release.sh cleanup --config examples/ubuntu-hello/rel
 Resume must reverify the same publication without another build, promotion, or duplicate release, then report the same missing-evidence cleanup error. Read-only planning needs no attestation. The final command must refuse deletion and preserve publication. A missing/foreign package association remains visible in the plan but does not grant linking authority.
 
 Keep checkpoint provenance, sanitized evidence, and exact remaining resource identifiers until results are accepted. Do not delete packages, releases, tags, repositories, or broad Docker caches as automatic teardown. Deletion remains separately authorized and evidence-gated. One successful fixture run does not certify other Gitea deployments, interrupted-write recovery, storage deletion behavior, or filesystem power-loss durability. Actual results belong in the task's `4-implemented.md`, not in a speculative success claim here.
+
+## Observed result
+
+On 2026-10-23, source commit `e096c05d760c156fd0641d3ae906937c942476c2` published [v0.2.3](https://git.lan/dev/container-release-template/releases/tag/v0.2.3) on Gitea 28.2.0. The final image is `git.lan/dev/container-release-template-hello@sha256:a7aa21103ec639854ff02d29668e61b85c22b24fb92c7f5cddf7a52e2fa1a8fd`. AMD64 and ARM64 each ran the image's default command and returned exactly `Hello World\n` with exit zero.
+
+The initial publication invoked one real Buildx build and one promotion. Same-checkpoint resume added neither and preserved the release ID, digest, source tag, and checkpoint. Publication/resume returned exit 1 only after verified publication because deletion evidence was deliberately absent. Read-only cleanup planning passed; explicit cleanup refused deletion without modifying the checkpoint. Gitea package records lacked repository links and were reported as skipped, not automatically linked. Deletion and interrupted-write behavior remain unverified on this deployment. The task's implementation record and `release-evidence.json` contain sanitized details; the source tag must never be moved to later result/documentation commits.
