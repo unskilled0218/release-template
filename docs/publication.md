@@ -1,5 +1,7 @@
 # Publication and recovery
 
+For the default 0.3.0 command, use [Bash publication and recovery](bash-publication.md). This page describes legacy Python checkpoint publication under original pinned launchers. Its commands are not accepted by the new default wrapper; current-source legacy entry is `scripts/legacy-release.sh`, and old transactions still require their original source/config/template pin.
+
 - [Publication and recovery](#publication-and-recovery)
   - [Preflight and publication](#preflight-and-publication)
   - [Checkpoints and retries](#checkpoints-and-retries)

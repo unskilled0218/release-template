@@ -8,12 +8,17 @@
 
 ```sh
 python3 -B -m unittest discover -s tests -v
-bash -n scripts/release.sh
-python3 -B scripts/launch.py validate --config examples/explicit.json
+for script in scripts/*.sh; do bash -n "$script"; done
+./scripts/release.sh --validate
+./scripts/legacy-release.sh validate --config examples/explicit.json
 git diff --check
 ```
 
 Tests use temporary Git repositories, private disposable token files, fake Docker commands, and loopback HTTP/OCI fixtures. They never read the actual default token, contact production, create live images, or install into existing projects. Faults cover accepted-but-response-lost registry/tag/release writes, durable intent after a child process exits, stale publication retries, staged graph protection, and interruption after each installer destination write. Simulated abrupt exceptions test workflow restart behavior; these are not all real Docker-process kill or filesystem power-loss tests.
+
+Version 0.3.0 adds real Bash-entry subprocess tests with PATH-injected Docker/curl ports and real owned Git/bare-remotes. They cover a normal build/promotion/notes-only release, complete retries independent of missing/foreign staging, ambiguous startup states, conflicting/missing immutable/final evidence, accepted-but-response-lost writes, unbound staging reuse, ignored local secrets, token/lock symlinks, context/private-auth handling, signal cleanup, legacy refusal, strict configuration, and bounded input/inventory behavior. The standalone Python standard-library helper replaces the planned jq dependency; tests do not import the legacy engine into the new release path. Installer fixtures deliberately freeze compatible protocol-1 wrapper bytes while new Bash source revisions are refused before destination changes.
+
+Receiving-helper tests exercise exact production byte limits and one-byte overflow, unending stdout/stderr, timeouts and descendant reaping. Inventory-helper tests use isolated in-process budget substitutions, never production environment overrides, for page/item/cumulative-byte/time limits and repeated/duplicate/incomplete evidence. These tests establish local failure behavior, not live Docker/Gitea behavior or power-loss guarantees. See the [Bash budgets and retry limits](bash-publication.md). Older version paragraphs below remain historical Python-engine evidence, not certification of the new Bash workflow.
 
 The external fake Docker test checks private auth configuration, builder/host preservation, password-stdin, and cleanup. OCI fixtures check nested indexes, runnable labels, attestations, digest integrity, and same-origin Bearer challenges. Fake tests do not prove installed Docker CLI diagnostics, runtime emulation, real multi-platform execution, or Gitea deletion behavior. Keep hooks' application runtime tests in future consumers.
 

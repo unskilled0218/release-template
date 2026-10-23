@@ -1,5 +1,7 @@
 # Installation and updates
 
+For 0.3.0's default Bash workflow, review/copy the [small Bash file set](bash-configuration.md); the managed updater cannot install this new bootstrap. The remainder of this page documents original pinned Python installations only. Keep existing transactions on their original checkout/pin; see [legacy compatibility](legacy-release.md).
+
 - [Installation and updates](#installation-and-updates)
   - [Explicit installation](#explicit-installation)
   - [Pinned updates](#pinned-updates)

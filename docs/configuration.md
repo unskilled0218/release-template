@@ -1,5 +1,7 @@
 # Configuration and hooks
 
+The default 0.3.0 command uses [Bash settings](bash-configuration.md), not the Python schema below. This page documents the preserved legacy engine and its original pinned launchers; on a current source checkout, explicit legacy validation uses `scripts/legacy-release.sh validate --config examples/explicit.json`. Do not mix the two configuration/identity formats.
+
 - [Configuration and hooks](#configuration-and-hooks)
   - [Configuration](#configuration)
   - [Version sources](#version-sources)

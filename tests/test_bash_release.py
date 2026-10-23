@@ -1,0 +1,509 @@
+"""Exercise the Bash entry point without credentials, Docker, or production services."""
+
+import importlib.util
+import json
+import os
+from pathlib import Path
+import shutil
+import subprocess
+import sys
+import tempfile
+import unittest
+from unittest.mock import patch
+import time
+
+
+ROOT = Path(__file__).resolve().parents[1]
+
+
+class BashInterfaceTests(unittest.TestCase):
+  def test_help_describes_no_argument_release(self):
+    result = subprocess.run(["bash", str(ROOT / "scripts/release.sh"), "--help"], capture_output=True, text=True)
+    self.assertEqual(result.returncode, 0, result.stderr)
+    self.assertIn("No arguments: build and publish", result.stdout)
+
+  def test_validate_needs_no_credentials_or_remote_operations(self):
+    environment = os.environ | {"GIT_TOKEN": "/missing/must-not-be-read"}
+    result = subprocess.run(["bash", str(ROOT / "scripts/release.sh"), "--validate"], env=environment,
+                            capture_output=True, text=True)
+    self.assertEqual(result.returncode, 0, result.stderr)
+    self.assertIn("no credentials or remote operations", result.stdout)
+
+  def test_old_options_point_to_explicit_legacy_entry(self):
+    result = subprocess.run(["bash", str(ROOT / "scripts/release.sh"), "publish"], capture_output=True, text=True)
+    self.assertNotEqual(result.returncode, 0)
+    self.assertIn("legacy-release.sh", result.stderr)
+
+
+def helper_module():
+  spec = importlib.util.spec_from_file_location("bash_release_data", ROOT / "scripts/release-data.py")
+  module = importlib.util.module_from_spec(spec)
+  spec.loader.exec_module(module)
+  return module
+
+
+class BashPublicationTests(unittest.TestCase):
+  def setUp(self):
+    self.temporary = tempfile.TemporaryDirectory(prefix="bash-release-test-")
+    self.addCleanup(self.temporary.cleanup)
+    self.base = Path(self.temporary.name)
+    self.root, self.bin = self.base / "project", self.base / "bin"
+    self.root.mkdir()
+    self.bin.mkdir()
+    (self.root / "scripts").mkdir()
+    for name in ("release.sh", "release-common.sh", "release-data.py", "release.json"):
+      shutil.copyfile(ROOT / "scripts" / name, self.root / "scripts" / name)
+    for name in ("Dockerfile", ".dockerignore", ".gitignore"):
+      shutil.copyfile(ROOT / name, self.root / name)
+    (self.root / "VERSION").write_text("1.0.0\n")
+    (self.root / "notes.md").write_text("# Release v1.0.0\n\nProject changes.\n")
+    self.token = self.base / "token"
+    self.token.write_text("SENTINEL_PRIVATE_TOKEN\n")
+    self.token.chmod(0o600)
+    config = json.loads((self.root / "scripts/release.json").read_text())
+    config |= {"repository": "fixtures/application", "image": "git.lan/fixtures/application",
+               "notes": "notes.md", "token_file": str(self.token)}
+    (self.root / "scripts/release.json").write_text(json.dumps(config))
+    self.state_path = self.base / "state.json"
+    self.state_path.write_text(json.dumps({"objects": {}, "aliases": {}, "releases": []}))
+    self.environment = os.environ | {"GIT_AUTHOR_NAME": "Fixture", "GIT_COMMITTER_NAME": "Fixture",
+      "GIT_AUTHOR_EMAIL": "fixture@localhost", "GIT_COMMITTER_EMAIL": "fixture@localhost",
+      "BASH_TEST_STATE": str(self.base), "PATH": str(self.bin) + ":" + os.environ["PATH"],
+      "TMPDIR": str(self.base), "HOME": str(self.base)}
+    for key in ("GIT_TOKEN", "GIT_USERNAME", "RELEASE_LOCK_FD", "DOCKER_CONTEXT", "DOCKER_CONFIG", "BUILDX_CONFIG"):
+      self.environment.pop(key, None)
+    port = ROOT / "tests/fixtures/bash_release_ports.py"
+    for name in ("git", "curl", "docker"):
+      target = self.bin / name
+      shutil.copyfile(port, target)
+      target.chmod(0o755)
+    self.git("init", "--quiet", "--initial-branch=main")
+    self.git("init", "--bare", "--quiet", str(self.base / "remote.git"))
+    self.git("remote", "add", "origin", str(self.base / "remote.git"))
+    self.commit()
+
+  def git(self, *args):
+    return subprocess.check_output(["/usr/bin/git", "-C", str(self.root), *args], env=self.environment,
+                                   stderr=subprocess.DEVNULL).decode().strip()
+
+  def commit(self):
+    self.git("add", ".")
+    self.git("commit", "--quiet", "-m", "Fixture")
+    self.git("push", "--quiet", "origin", "HEAD:main")
+
+  def state(self):
+    return json.loads(self.state_path.read_text())
+
+  def change(self, **values):
+    self.state_path.write_text(json.dumps(self.state() | values))
+
+  def events(self):
+    path = self.base / "events"
+    return path.read_text().splitlines() if path.exists() else []
+
+  def release(self, *args):
+    result = subprocess.run(["bash", str(self.root / "scripts/release.sh"), *args], cwd=self.base,
+                            env=self.environment, capture_output=True, text=True, timeout=90)
+    self.assertNotIn("SENTINEL_PRIVATE_TOKEN", result.stdout + result.stderr)
+    self.assertEqual(list(self.base.glob("bash-release.*")), [], "Only run-owned temporary paths must be cleaned")
+    return result
+
+  def assert_no_writes(self):
+    self.assertFalse(set(self.events()) & {"build", "tag-push", "promote", "release-post"}, self.events())
+
+  def test_publish_and_completed_retry_ignore_missing_or_foreign_staging(self):
+    result = self.release()
+    self.assertEqual(result.returncode, 0, result.stderr)
+    self.assertIn("Publication verified: v1.0.0", result.stdout)
+    for action in ("build", "tag-push", "promote", "release-post"):
+      self.assertEqual(self.events().count(action), 1, action)
+    state = self.state()
+    self.assertEqual(state["releases"][0]["body"], "# Release v1.0.0\n\nProject changes.\n")
+    oid = self.git("ls-remote", "--tags", "origin", "refs/tags/v1.0.0").split()[0]
+    staging = next(name for name in state["aliases"] if name.startswith("rt-"))
+    for aliases in ({"latest": state["prepared"]}, {"latest": state["prepared"], staging: "sha256:" + "0" * 64}):
+      self.change(aliases=aliases)
+      (self.base / "events").write_text("")
+      result = self.release()
+      self.assertEqual(result.returncode, 0, result.stderr)
+      self.assert_no_writes()
+      self.assertFalse(any(e.startswith("registry:rt-") for e in self.events()))
+      self.assertEqual(self.git("ls-remote", "--tags", "origin", "refs/tags/v1.0.0").split()[0], oid)
+
+  def test_tag_only_startup_refuses_before_staging_or_build(self):
+    self.change(fail_release=True)
+    result = self.release()
+    self.assertNotEqual(result.returncode, 0)
+    self.assertIn("Release creation not confirmed", result.stderr)
+    (self.base / "events").write_text("")
+    self.change(fail_release=False)
+    result = self.release()
+    self.assertNotEqual(result.returncode, 0)
+    self.assertIn("Ambiguous", result.stderr)
+    self.assert_no_writes()
+    self.assertFalse(any(e.startswith("registry:") for e in self.events()))
+
+  def test_release_only_startup_refuses_before_build(self):
+    self.change(releases=[{"id": 1, "tag_name": "v1.0.0", "draft": False, "prerelease": False}])
+    result = self.release()
+    self.assertNotEqual(result.returncode, 0)
+    self.assertIn("Ambiguous", result.stderr)
+    self.assert_no_writes()
+
+  def test_lost_accepted_responses_are_reconciled_without_duplicate_writes(self):
+    self.change(lose_tag=True, lose_promotion=True, lose_release=True)
+    result = self.release()
+    self.assertEqual(result.returncode, 0, result.stderr)
+    for action in ("build", "tag-push", "promote", "release-post"):
+      self.assertEqual(self.events().count(action), 1, action)
+
+  def test_unbound_interrupted_build_reuses_verified_staging(self):
+    self.change(lose_build=True)
+    self.assertNotEqual(self.release().returncode, 0)
+    self.change(lose_build=False)
+    result = self.release()
+    self.assertEqual(result.returncode, 0, result.stderr)
+    self.assertEqual(self.events().count("build"), 1)
+
+  def test_preflight_refusals_do_not_write(self):
+    for flag in ("wrong_remote", "wrong_main", "unsupported", "null_inventory", "malformed", "oversized", "realm_foreign"):
+      with self.subTest(flag=flag):
+        self.change(**{flag: True})
+        self.assertNotEqual(self.release().returncode, 0)
+        self.assert_no_writes()
+        self.change(**{flag: False})
+    for status in (401, 500):
+      self.change(status=status)
+      self.assertNotEqual(self.release().returncode, 0)
+      self.assert_no_writes()
+    self.change(status=None)
+
+  def test_dirty_source_and_unsafe_credentials_stop_before_build(self):
+    (self.root / "untracked").write_text("user work")
+    self.assertNotEqual(self.release().returncode, 0)
+    (self.root / "untracked").unlink()
+    self.token.chmod(0o644)
+    self.assertNotEqual(self.release().returncode, 0)
+    self.assert_no_writes()
+
+  def test_invalid_config_and_local_validation_do_not_read_token(self):
+    self.token.unlink()
+    result = self.release("--validate")
+    self.assertEqual(result.returncode, 0, result.stderr)
+    self.assertEqual(self.events(), [])
+    path = self.root / "scripts/release.json"
+    original = path.read_text()
+    for text in (original[:-1] + ',"schema":1}', original[:-1] + ',"extra":true}', '{"schema":null}', '{'):
+      path.write_text(text)
+      self.assertNotEqual(self.release("--validate").returncode, 0)
+    self.assertEqual(self.events(), [])
+
+  def test_legacy_markers_and_non_main_refuse(self):
+    for name in ("release-template.lock.json", ".template-transaction", ".release-template/v1.0.0.json"):
+      path = self.root / name
+      path.parent.mkdir(exist_ok=True)
+      path.write_text("legacy")
+      self.assertNotEqual(self.release().returncode, 0)
+      path.unlink()
+    self.git("switch", "--quiet", "-c", "task")
+    self.assertNotEqual(self.release().returncode, 0)
+    self.assert_no_writes()
+
+  def test_newer_publication_and_repeated_pages_refuse(self):
+    self.change(releases=[{"id": 2, "tag_name": "v2.0.0", "draft": False, "prerelease": False}])
+    self.assertNotEqual(self.release().returncode, 0)
+    self.assert_no_writes()
+    self.change(releases=[{"id": 1, "tag_name": "v0.9.0", "draft": False, "prerelease": False}], repeat_pages=True)
+    result = self.release()
+    self.assertNotEqual(result.returncode, 0)
+    self.assertIn("Pagination did not advance", result.stderr)
+    self.assert_no_writes()
+
+  def test_bad_build_metadata_stops_before_tag_and_promotion(self):
+    self.change(bad_metadata=True)
+    result = self.release()
+    self.assertNotEqual(result.returncode, 0)
+    self.assertEqual(self.events().count("build"), 1)
+    self.assertFalse(set(self.events()) & {"tag-push", "promote", "release-post"})
+
+  def test_completed_missing_bound_content_or_final_alias_never_repairs(self):
+    result = self.release()
+    self.assertEqual(result.returncode, 0, result.stderr)
+    original = self.state()
+    for aliases, objects in (({}, original["objects"]),
+                             ({"latest": "sha256:" + "a" * 64}, original["objects"]),
+                             (original["aliases"], {})):
+      with self.subTest(aliases=aliases):
+        self.change(aliases=aliases, objects=objects)
+        (self.base / "events").write_text("")
+        self.assertNotEqual(self.release().returncode, 0)
+        self.assert_no_writes()
+    self.change(**original)
+
+  def test_completed_changed_body_or_local_tag_refuses(self):
+    result = self.release()
+    self.assertEqual(result.returncode, 0, result.stderr)
+    records = self.state()["releases"]
+    self.change(releases=[records[0] | {"body": "Foreign body"}])
+    (self.base / "events").write_text("")
+    self.assertNotEqual(self.release().returncode, 0)
+    self.assert_no_writes()
+    self.change(releases=records)
+    self.git("tag", "v1.0.0")
+    self.assertNotEqual(self.release().returncode, 0)
+    self.assert_no_writes()
+
+  def test_source_change_does_not_adopt_old_publication(self):
+    result = self.release()
+    self.assertEqual(result.returncode, 0, result.stderr)
+    (self.root / "new-source").write_text("Different source\n")
+    self.commit()
+    (self.base / "events").write_text("")
+    self.assertNotEqual(self.release().returncode, 0)
+    self.assert_no_writes()
+
+  def test_local_tag_conflict_refuses_before_build(self):
+    self.git("tag", "v1.0.0")
+    result = self.release()
+    self.assertNotEqual(result.returncode, 0)
+    self.assertIn("Local tag", result.stderr)
+    self.assert_no_writes()
+
+  def test_captured_external_symlink_never_enters_build(self):
+    (self.root / "escape").symlink_to(self.token)
+    self.commit()
+    result = self.release()
+    self.assertNotEqual(result.returncode, 0)
+    self.assertIn("symlink escapes", result.stderr)
+    self.assert_no_writes()
+
+  def test_lock_symlink_and_other_lock_owner_refuse(self):
+    lock = self.root / ".template-operation.lock"
+    lock.symlink_to(self.token)
+    self.assertNotEqual(self.release().returncode, 0)
+    self.assertEqual(self.token.read_text(), "SENTINEL_PRIVATE_TOKEN\n")
+    lock.unlink()
+    import fcntl
+    with lock.open("w") as held:
+      fcntl.flock(held, fcntl.LOCK_EX | fcntl.LOCK_NB)
+      self.assertNotEqual(self.release().returncode, 0)
+    self.assert_no_writes()
+
+  def test_ignored_worktree_secret_is_not_in_committed_snapshot(self):
+    with (self.root / ".gitignore").open("a") as output:
+      output.write("ignored-secret\n")
+    self.commit()
+    (self.root / "ignored-secret").write_text("SENTINEL_PRIVATE_TOKEN")
+    result = self.release()
+    self.assertEqual(result.returncode, 0, result.stderr)
+
+  def test_token_symlink_is_rejected(self):
+    backing = self.base / "backing"
+    self.token.rename(backing)
+    self.token.symlink_to(backing)
+    self.assertNotEqual(self.release().returncode, 0)
+    self.assert_no_writes()
+
+  def test_wrong_notes_heading_fails_before_credential_read(self):
+    (self.root / "notes.md").write_text("# Release v9.0.0\n\nWrong version.\n")
+    self.commit()
+    self.token.unlink()
+    result = self.release()
+    self.assertNotEqual(result.returncode, 0)
+    self.assertIn("notes heading", result.stderr)
+    self.assert_no_writes()
+
+  def test_signal_cleans_owned_temporaries_and_releases_lock(self):
+    self.change(hang_build=True)
+    process = subprocess.Popen(["bash", str(self.root / "scripts/release.sh")], cwd=self.base,
+                               env=self.environment, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    try:
+      deadline = time.monotonic() + 30
+      while "build" not in self.events() and process.poll() is None and time.monotonic() < deadline:
+        time.sleep(0.02)
+      self.assertIn("build", self.events())
+      process.terminate()
+      stdout, stderr = process.communicate(timeout=10)
+      self.assertNotEqual(process.returncode, 0)
+      self.assertNotIn("SENTINEL_PRIVATE_TOKEN", stdout + stderr)
+      self.assertEqual(list(self.base.glob("bash-release.*")), [])
+      import fcntl
+      with (self.root / ".template-operation.lock").open() as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    finally:
+      if process.poll() is None:
+        process.kill()
+      process.communicate()
+
+  def test_changed_predecessor_after_build_stops_before_tag(self):
+    self.change(change_latest_build=True)
+    result = self.release()
+    self.assertNotEqual(result.returncode, 0)
+    self.assertIn("Latest changed", result.stderr)
+    self.assertEqual(self.events().count("build"), 1)
+    self.assertFalse(set(self.events()) & {"tag-push", "promote", "release-post"})
+
+  def test_post_write_budget_failure_never_continues_or_rolls_back(self):
+    self.change(oversize_after_promotion=True)
+    result = self.release()
+    self.assertNotEqual(result.returncode, 0)
+    self.assertIn("byte limit", result.stderr)
+    self.assertEqual(self.events().count("promote"), 1)
+    self.assertNotIn("release-post", self.events())
+    self.assertEqual(self.state()["aliases"]["latest"], self.state()["prepared"])
+
+  def test_historical_note_blob_ignores_current_external_symlink(self):
+    data = helper_module()
+    captured = self.git("rev-parse", "HEAD")
+    original = (self.root / "notes.md").read_bytes()
+    (self.root / "notes.md").unlink()
+    (self.root / "notes.md").symlink_to(self.token)
+    self.commit()
+    self.assertEqual(data.blob(self.root, captured, "notes.md"), original)
+    current = self.git("rev-parse", "HEAD")
+    with self.assertRaises(data.Refusal):
+      data.blob(self.root, current, "notes.md")
+    for path in ("../notes.md", "/notes.md", "notes*.md", "bad\x00.md"):
+      with self.subTest(path=path), self.assertRaises(data.Refusal):
+        data.blob(self.root, captured, path)
+
+
+class BashDataTests(unittest.TestCase):
+  def setUp(self):
+    self.data = helper_module()
+
+  def test_bounded_capture_exact_limit_and_overflow(self):
+    output = self.data.command([sys.executable, "-c", "import sys; sys.stdout.buffer.write(b'x'*64)"], 64)
+    self.assertEqual(len(output), 64)
+    with self.assertRaisesRegex(self.data.Refusal, "byte limit"):
+      self.data.command([sys.executable, "-c", "import sys; sys.stdout.buffer.write(b'x'*65)"], 64)
+
+  def test_unending_producer_and_stderr_are_bounded(self):
+    with self.assertRaisesRegex(self.data.Refusal, "byte limit"):
+      self.data.command([sys.executable, "-c", "import os\nwhile True: os.write(1,b'x'*65536)"], 1024)
+    with self.assertRaisesRegex(self.data.Refusal, "byte limit"):
+      self.data.command([sys.executable, "-c", "import os\nwhile True: os.write(2,b'x'*65536)"], 1024)
+
+  def test_timeout_reaps_producer(self):
+    with self.assertRaisesRegex(self.data.Refusal, "timed out"):
+      self.data.command([sys.executable, "-c", "import time; time.sleep(5)"], seconds=0.05)
+
+  def test_strict_json_and_versions(self):
+    for text in (b'{"x":1,"x":2}', b'{"x":NaN}', b'"\xff"'):
+      with self.assertRaises((self.data.Refusal, ValueError, UnicodeError)):
+        self.data.decode(text)
+    for value in ("01.0.0", "1.0", "v1.0.0", None):
+      with self.assertRaises(self.data.Refusal):
+        self.data.version(value)
+    self.assertLess(self.data.version("1.9.0"), self.data.version("1.10.0"))
+
+  def test_all_byte_budgets_allow_exact_size_and_refuse_extra_byte(self):
+    # Exercise the receiving helper at real production capacities, without buffering remote data in a fake parser.
+    capacities = {16, self.data.ANNOTATION_LIMIT, self.data.CONFIG_LIMIT, self.data.API_LIMIT, self.data.REF_LIMIT}
+    for capacity in sorted(capacities):
+      for extra in (0, 1):
+        with self.subTest(capacity=capacity, extra=extra):
+          command = [sys.executable, "-c", "import sys; sys.stdout.buffer.write(b' '*int(sys.argv[1]))", str(capacity + extra)]
+          if extra:
+            with self.assertRaisesRegex(self.data.Refusal, "byte limit"):
+              self.data.command(command, capacity)
+          else:
+            self.assertEqual(len(self.data.command(command, capacity)), capacity)
+
+  def test_inventory_page_item_byte_and_time_budgets(self):
+    config = {"gitea": "https://fixture.invalid", "repository": "fixtures/application", "tag": "v1.0.0", "version": "1.0.0"}
+    record = {"tag_name": "v0.9.0", "draft": False, "prerelease": False}
+    body = self.data.canonical([record])
+    empty = b"[]"
+    for cap, value, replies, expected in (
+      ("ITEM_LIMIT", 1, [body, empty, empty], True),
+      ("ITEM_LIMIT", 0, [body], False),
+      ("INVENTORY_LIMIT", len(body) + 4, [body, empty, empty], True),
+      ("INVENTORY_LIMIT", len(body) + 3, [body, empty, empty], False),
+      ("PAGE_LIMIT", 2, [empty, empty], True),
+      ("PAGE_LIMIT", 1, [empty], False)):
+      with self.subTest(cap=cap, value=value), patch.object(self.data, cap, value), \
+           patch.object(self.data, "http", side_effect=[(200, {}, data) for data in replies]), \
+           patch.object(self.data, "command", return_value=b""):
+        if expected:
+          self.assertIsNone(self.data.inventory("unused", "unused", config)["object"])
+        else:
+          with self.assertRaises(self.data.Refusal):
+            self.data.inventory("unused", "unused", config)
+    with patch.object(self.data.time, "monotonic", side_effect=[0, 601]):
+      with self.assertRaisesRegex(self.data.Refusal, "budget"):
+        self.data.inventory("unused", "unused", config)
+
+  def test_inventory_repetition_duplicates_and_incomplete_pages(self):
+    config = {"gitea": "https://fixture.invalid", "repository": "fixtures/application", "tag": "v1.0.0", "version": "1.0.0"}
+    record = {"tag_name": "v0.9.0", "draft": False, "prerelease": False}
+    cases = [([record], [record]), ([record], [record | {"id": 2}])]
+    for pages in cases:
+      with patch.object(self.data, "http", side_effect=[(200, {}, self.data.canonical(page)) for page in pages]):
+        with self.assertRaises(self.data.Refusal):
+          self.data.inventory("unused", "unused", config)
+    with patch.object(self.data, "PAGE_LIMIT", 2), patch.object(self.data, "http", side_effect=[
+        (200, {}, self.data.canonical([record | {"tag_name": "v0.8.0"}])),
+        (200, {}, self.data.canonical([record]))]):
+      with self.assertRaisesRegex(self.data.Refusal, "terminal"):
+        self.data.inventory("unused", "unused", config)
+
+  def test_ref_inventory_overflow_and_malformed_advertisement(self):
+    config = {"gitea": "https://fixture.invalid", "repository": "fixtures/application", "tag": "v1.0.0", "version": "1.0.0"}
+    for refs in (b"bad ref\n", ("a" * 40 + "\trefs/tags/v1.0.0^{}\n").encode()):
+      with patch.object(self.data, "http", return_value=(200, {}, b"[]")), patch.object(self.data, "command", return_value=refs):
+        with self.assertRaises(self.data.Refusal):
+          self.data.inventory("unused", "unused", config)
+
+  def test_timeout_and_overflow_kill_descendant_processes(self):
+    with tempfile.TemporaryDirectory() as directory:
+      marker = Path(directory) / "escaped"
+      code = ("import subprocess,sys,time; "
+              "subprocess.Popen([sys.executable,'-c',sys.argv[1]]); time.sleep(5)")
+      child = "import time; from pathlib import Path; time.sleep(.3); Path(" + repr(str(marker)) + ").write_text('bad')"
+      with self.assertRaises(self.data.Refusal):
+        self.data.command([sys.executable, "-c", code, child], seconds=0.1)
+      time.sleep(0.4)
+      self.assertFalse(marker.exists())
+
+  def test_image_verification_rejects_wrong_platform_labels_and_member_shapes(self):
+    config = {"gitea": "https://fixture.invalid", "image": "fixture.invalid/fixtures/application",
+              "repository": "fixtures/application", "version": "1.0.0"}
+    commit = "a" * 40
+    root, member, content = "sha256:" + "1" * 64, "sha256:" + "2" * 64, "sha256:" + "3" * 64
+    labels = {"org.opencontainers.image.revision": commit, "org.opencontainers.image.version": "1.0.0",
+              "org.opencontainers.image.source": "https://fixture.invalid/fixtures/application"}
+    index = {"schemaVersion": 2, "mediaType": "application/vnd.oci.image.index.v1+json", "manifests": [
+      {"digest": member, "platform": {"os": "linux", "architecture": "amd64"}},
+      {"digest": member, "platform": {"os": "linux", "architecture": "arm64"}}]}
+    manifest = {"schemaVersion": 2, "config": {"digest": content}}
+    for content_value in ({"os": "linux", "architecture": "riscv64", "config": {"Labels": labels}},
+                          {"os": "linux", "architecture": "amd64", "config": {"Labels": labels | {"org.opencontainers.image.version": "2.0.0"}}}):
+      with patch.object(self.data, "registry", side_effect=[(root, index), (member, manifest), (content, content_value)]):
+        with self.assertRaises(self.data.Refusal):
+          self.data.image("unused", config, root, commit)
+    for bad in ({}, index | {"manifests": []}, index | {"schemaVersion": 1}):
+      with patch.object(self.data, "registry", return_value=(root, bad)):
+        with self.assertRaises(self.data.Refusal):
+          self.data.image("unused", config, root, commit)
+
+  def test_advertised_platforms_are_tokens_not_substring_matches(self):
+    with tempfile.TemporaryDirectory() as directory:
+      path = Path(directory) / "builder"
+      path.write_text("Platforms: linux/amd64, linux/arm64\n")
+      self.assertEqual(self.data.dispatch(["platforms", str(path)]), 0)
+      for text in ("Platforms: linux/amd64foreign, linux/arm64\n", "random linux/amd64 linux/arm64"):
+        path.write_text(text)
+        with self.assertRaises(self.data.Refusal):
+          self.data.dispatch(["platforms", str(path)])
+
+  def test_blocked_stdin_is_also_subject_to_deadline(self):
+    with self.assertRaises(self.data.Refusal):
+      self.data.command([sys.executable, "-c", "import time; time.sleep(5)"], seconds=0.05, input_data=b"x" * 65536)
+
+  def test_git_destination_normalization_keeps_ssh_ports_independent(self):
+    for url in ("git@git.lan:fixtures/application.git", "ssh://git@git.lan:2222/fixtures/application.git",
+                "https://git.lan:443/fixtures/application.git"):
+      self.assertEqual(self.data.remote_key(url), ("git.lan", "fixtures/application"))
+    self.assertEqual(self.data.remote_key("https://git.lan:8443/fixtures/application.git"),
+                     ("git.lan:8443", "fixtures/application"))

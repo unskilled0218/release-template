@@ -33,6 +33,8 @@ def source_inventory(source, revision):
     return result.stdout
   commit = git("rev-parse", "--verify", revision + "^{commit}").decode().strip()
   require(len(commit) == 40 and revision == commit, "Pin an exact immutable 40-character commit, not a branch or tag")
+  require(not git("ls-tree", "--name-only", commit, "scripts/release-data.py").strip(),
+          "Bash template revisions cannot be installed as a legacy Python inventory; copy/review the Bash template separately")
   paths = git("ls-tree", "-r", "--name-only", commit, "release_template", "scripts/launch.py", "scripts/release.sh", "VERSION").decode().splitlines()
   files, bootstrap = {}, {}
   template_version = None
@@ -180,14 +182,18 @@ def main():
   arguments = parser.parse_args()
   try:
     require(arguments.destination.is_dir(), "Destination must already exist")
+    inventory = None
+    if not arguments.verify and not arguments.recover:
+      require(arguments.revision, "Select an immutable --revision")
+      # Refuse an incompatible source before even creating a destination lock file.
+      inventory = source_inventory(arguments.source, arguments.revision)
     with DestinationLock(arguments.destination):
       if arguments.verify:
         print(json.dumps(verify(arguments.destination.resolve()), sort_keys=True))
       elif arguments.recover:
         recover(arguments.destination, arguments.recover)
       else:
-        require(arguments.revision, "Select an immutable --revision")
-        files, bootstrap, lock = source_inventory(arguments.source, arguments.revision)
+        files, bootstrap, lock = inventory
         print(json.dumps(transaction(arguments.destination, files, bootstrap, lock, arguments.dry_run), sort_keys=True))
     return 0
   except (ReleaseError, OSError, ValueError, RuntimeError, subprocess.SubprocessError) as exc:

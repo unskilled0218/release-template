@@ -1,0 +1,15 @@
+.git
+.release-template
+.template-*
+tasks
+tests
+release_template
+examples
+scripts
+docs
+.env*
+**/*token*
+**/*credential*
+**/*.pem
+**/*.key
+**/__pycache__

@@ -24,7 +24,12 @@ class UpdateTests(unittest.TestCase):
     self.source.mkdir()
     self.destination.mkdir()
     for name in ("release_template", "scripts"):
-      shutil.copytree(ROOT / name, self.source / name, ignore=shutil.ignore_patterns("__pycache__"))
+      shutil.copytree(ROOT / name, self.source / name, ignore=shutil.ignore_patterns(
+        "__pycache__", "release-data.py", "release-common.sh", "release.json", "legacy-release.sh"))
+    # Freeze the protocol-1 wrapper; current HEAD intentionally has a different default bootstrap.
+    (self.source / "scripts/release.sh").write_text(
+      '#!/usr/bin/env bash\nset -euo pipefail\nexport PYTHONDONTWRITEBYTECODE=1\n'
+      'exec python3 "$(dirname "${BASH_SOURCE[0]}")/launch.py" "$@"\n')
     shutil.copyfile(ROOT / "VERSION", self.source / "VERSION")
     self.git("init", "-b", "main")
     self.commit()
@@ -69,6 +74,18 @@ class UpdateTests(unittest.TestCase):
     with self.assertRaises(RuntimeError):
       self.install()
     self.assertEqual(managed.read_text(), "user work")
+
+  def test_bash_source_is_refused_before_destination_changes(self):
+    (self.source / "scripts/release-data.py").write_text('"""New Bash data boundary."""\n')
+    self.commit()
+    with self.assertRaisesRegex(ReleaseError, "Bash template"):
+      self.inventory()
+    self.assertEqual(list(self.destination.iterdir()), [])
+    result = subprocess.run([sys.executable, str(ROOT / "scripts/update.py"), str(self.destination),
+                             "--source", str(self.source), "--revision", self.revision], capture_output=True, text=True)
+    self.assertNotEqual(result.returncode, 0)
+    self.assertIn("Bash template", result.stderr)
+    self.assertEqual(list(self.destination.iterdir()), [])
 
   def test_upstream_removal_prunes_only_owned_unchanged_files(self):
     extra = self.source / "release_template/obsolete.py"

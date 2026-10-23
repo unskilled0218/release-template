@@ -1,5 +1,7 @@
 # Credentials and TLS
 
+For the default Bash command, follow [Bash credentials and prerequisites](bash-configuration.md#credentials-and-prerequisites). It uses the configured login without an inline assignment and optionally accepts the same `GIT_TOKEN` file-path override. The details below describe the preserved legacy Python workflow, including its stricter rejection of old environment aliases and original pinned launcher commands.
+
 - [Credentials and TLS](#credentials-and-tls)
   - [Token file](#token-file)
   - [Trust and Docker isolation](#trust-and-docker-isolation)
