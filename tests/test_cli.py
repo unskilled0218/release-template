@@ -9,8 +9,9 @@ import unittest
 from unittest.mock import patch
 
 from release_template import cli
-from release_template.core import ReleaseError, canonical, digest
-from tests.support import REVISION, FakeGitea, FakeRegistry, FakeRunner, configuration, evidence, package
+from release_template.core import ReleaseError, canonical, digest, load
+from release_template.workflow import Workflow
+from tests.support import COMMIT, REVISION, FakeGitea, FakeRegistry, FakeRunner, configuration, evidence, package
 
 
 class CLITests(unittest.TestCase):
@@ -90,6 +91,29 @@ class CLITests(unittest.TestCase):
     self.assertEqual(self.invoke("resume", "--tag", "v1.0.0"), 1)
     self.assertIn("existing verified release checkpoint", self.errors.getvalue())
     self.assertEqual(self.gitea.deleted, [])
+
+  def test_abandon_confirmation_failure_reports_cleanup_incomplete_and_preserves_run(self):
+    old = Workflow(self.root, configuration(), "0.9.0", REVISION, self.runner, self.registry, self.gitea, COMMIT)
+    tag = "rt-" + old.state.data["run"] + "-application"
+    root = self.registry.add("application", tag, "0.9.0")
+    old.state.data["created"] -= 2 * 86400
+    old.state.data["outputs"] = {"application": {"digest": root}}
+    old.state.data["staging"] = {"application": {"tag": tag, "digest": root}}
+    old.state.flush()
+    before = old.state.path.read_bytes()
+    self.gitea.package_records.append(package("application", tag))
+    self.assertEqual(self.invoke("publish", "--tag", "v1.0.0"), 1)
+    self.errors.seek(0)
+    self.errors.truncate()
+    path = evidence(self.root / "evidence.json")
+    with patch.object(self.gitea, "delete_package", return_value=None):
+      status = self.invoke("abandon", "--tag", "v1.0.0", "--run", old.state.data["run"],
+                           "--minimum-age-days", "1", "--deletion-evidence", str(path))
+    self.assertEqual(status, 1)
+    self.assertIn("Publication succeeded; cleanup incomplete: Abandoned package deletion is not yet absent", self.errors.getvalue())
+    self.assertEqual(old.state.path.read_bytes(), before)
+    self.assertEqual(self.registry.resolve("application", tag), root)
+    self.assertTrue(load(self.root / ".release-template/v1.0.0.json")["published"])
 
   def test_standalone_cli_refuses_test_http_without_contacting_loopback(self):
     config = configuration() | {"test_http": True, "gitea": "http://127.0.0.1:1", "registry": "127.0.0.1:1"}

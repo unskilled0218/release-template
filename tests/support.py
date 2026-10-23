@@ -1,6 +1,7 @@
 import copy
 import json
 from contextlib import contextmanager
+from datetime import datetime, timezone
 from pathlib import Path
 
 from release_template.core import ReleaseError, digest
@@ -202,10 +203,11 @@ def package(name, reference, repository="fixtures/application"):
   return {"type": "container", "name": name, "version": reference, "repository": {"full_name": repository}}
 
 
-def evidence(path):
+def evidence(path, verified_at=None):
+  verified_at = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ") if verified_at is None else verified_at
   record = {"schema": 2, "product": "gitea", "origin": "https://gitea.invalid", "server_version": "28.2.0",
             "disposable_repository": "fixtures/disposable-contract", "operator": "fixture",
-            "verified_at": "2026-10-22", "alias_preserves_shared_manifest": True,
+            "verified_at": verified_at, "alias_preserves_shared_manifest": True,
             "digest_deletion_is_scoped": True, "retained_platforms_pullable": True}
   path.write_text(json.dumps(record))
   return path

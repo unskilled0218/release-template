@@ -3,6 +3,7 @@
 import heapq
 import re
 import time
+from datetime import datetime, timezone
 
 from .core import ReleaseError, canonical, digest, load, older, require
 from .policy import owned_package, release_candidates
@@ -13,6 +14,8 @@ from .config import server_version
 MAX_RETIREMENT_CANDIDATES = 10000
 MAX_RETIREMENT_REFERENCES = 100000
 DIGEST_OWNERSHIP_REASON = "Digest ownership/version cannot be proven"
+MAX_EVIDENCE_AGE_SECONDS = 30 * 86400
+MAX_EVIDENCE_FUTURE_SECONDS = 5 * 60
 
 
 def candidate_projection(inventory):
@@ -123,6 +126,20 @@ def validate_retirement(inventory):
   return graphs
 
 
+def validate_evidence_time(value, now=None):
+  """Enforce exact UTC formats and inclusive freshness limits without rewriting evidence."""
+  require(isinstance(value, str) and
+          re.fullmatch(r"[0-9]{4}-[0-9]{2}-[0-9]{2}(?:T[0-9]{2}:[0-9]{2}:[0-9]{2}Z)?", value),
+          "Invalid deletion evidence verified_at; expected UTC date or UTC-second timestamp")
+  try:
+    verified = datetime.fromisoformat(value).replace(tzinfo=timezone.utc).timestamp()
+  except ValueError as exc:
+    raise ReleaseError("Invalid deletion evidence verified_at calendar date or time") from exc
+  age = (time.time() if now is None else now) - verified
+  require(age >= -MAX_EVIDENCE_FUTURE_SECONDS, "Deletion evidence verified_at is too far in the future")
+  require(age <= MAX_EVIDENCE_AGE_SECONDS, "Deletion evidence expired; repeat disposable verification")
+
+
 def deletion_evidence(path, config):
   require(path is not None, "Container deletion disabled: no disposable Gitea verification evidence supplied")
   evidence = load(path)
@@ -137,6 +154,7 @@ def deletion_evidence(path, config):
           evidence.get("retained_platforms_pullable") is True,
           "Deletion evidence requires fresh schema-2 Gitea same-server disposable verification results")
   server_version(evidence.get("server_version"))
+  validate_evidence_time(evidence["verified_at"])
   return evidence
 
 
@@ -410,6 +428,25 @@ def apply(workflow, evidence_path):
   require(workflow.state.data["cleanup_complete"], "Cleanup incomplete: ambiguous records were preserved; inspect cleanup-plan")
 
 
+def retire_abandoned_alias(workflow, name, staging):
+  """Reconcile both remote views before deletion and before recording retirement."""
+  current = workflow.registry.resolve(name, staging["tag"])
+  package_path = workflow.gitea.package_path(name, staging["tag"])
+  package = workflow.gitea.get(package_path, absent=True)
+  require(current is None or current == staging["digest"], "Abandoned staging identity conflict")
+  require(package is None or owned_package(package, workflow.config["repository"],
+          set(workflow.state.data["outputs"])), "Abandoned package association differs")
+  require((current is None) == (package is None), "Abandoned package/registry presence differs; retry abandonment")
+  if package is None:
+    return
+  workflow.verify_publication()
+  workflow.gitea.delete_package(name, staging["tag"])
+  require(workflow.gitea.get(package_path, absent=True) is None,
+          "Abandoned package deletion is not yet absent; retry abandonment")
+  require(workflow.registry.resolve(name, staging["tag"]) is None,
+          "Abandoned registry alias is not yet absent; retry abandonment")
+
+
 def abandon(workflow, run_ids, minimum_age, evidence_path):
   """Explicitly selected abandoned runs only; never infer authority from tag age."""
   require(run_ids and minimum_age >= 86400, "Select run IDs and a retention threshold of at least one day")
@@ -429,15 +466,7 @@ def abandon(workflow, run_ids, minimum_age, evidence_path):
     for name, staging in record["staging"].items():
       require(staging.get("tag") == "rt-" + record["run"] + "-" + name and staging.get("digest"),
               "Abandoned staging ownership is incomplete")
-      current = workflow.registry.resolve(name, staging["tag"])
-      if current is not None:
-        require(current == staging["digest"], "Abandoned staging identity conflict")
-        workflow.verify_publication()
-        package = workflow.gitea.get(workflow.gitea.package_path(name, staging["tag"]), absent=True)
-        require(package is None or owned_package(package, workflow.config["repository"],
-                set(workflow.state.data["outputs"])), "Abandoned package association differs")
-        if package is not None:
-          workflow.gitea.delete_package(name, staging["tag"])
+      retire_abandoned_alias(workflow, name, staging)
     record["abandoned"] = True
     # Do not erase graph protection: this operation retires aliases, not manifest digests.
     from .core import save

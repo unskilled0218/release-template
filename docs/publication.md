@@ -21,6 +21,8 @@ Descriptions contain schema-bound source, template, image digest, and platform i
 
 Cleanup runs after publication but requires the independent evidence gate in [retention safety](retention.md). Without evidence, publication remains recorded as successful and the command returns nonzero with “Publication succeeded; cleanup incomplete”. Do not repeatedly publish merely to satisfy cleanup; provide approved evidence and use cleanup-only mode.
 
+Cleanup and abandonment also refuse malformed, expired, or excessively future-dated verification evidence. Version 0.2.2 enforces exact UTC formats, a 30-day maximum age, and a 5-minute future tolerance at cleanup/abandon invocation entry, not before every DELETE. Reverify after expiry or storage changes; do not merely redate an attestation. These refusals preserve an already recorded publication's success and return cleanup incomplete.
+
 ## Checkpoints and retries
 
 ```sh
@@ -40,6 +42,8 @@ After source advances, use the same committed source checkout and pinned templat
 `resume`, `cleanup-plan`, and `cleanup` require the exact checkpoint template revision, not merely the same schema. Updating managed code cannot resume an old-pin publication or cleanup transaction. Preserve the checkpoint and its original provenance; cross-revision adoption requires a separately reviewed procedure and has no automatic bypass. Do not rewrite identity or release metadata, discard state, or use vulnerable old-code cleanup to force progress. Within a matching revision, saved cleanup inventories are revalidated against current identities and all surviving reference graphs before deletion.
 
 Cleanup now checkpoints a versioned [retirement schedule](retention.md#retirement-schedule) before its first deletion. Referring indexes/manifests retire before shared or nested dependencies. Resume keeps that approved order, confirms exact absent targets without repeating DELETE, and still fetches fresh live survivor graphs. Publication remains successful if cleanup stops because a new reference protects a pending dependency. Retry cannot repair a legacy transaction whose child was already deleted without approved ordering evidence; preserve that state for separately reviewed operator recovery rather than forcing adoption or rebuilding content.
+
+Explicit [abandonment](retention.md#staging-and-abandoned-runs) requires both scoped package and registry alias absence before recording a run as abandoned. A successful DELETE with uncertain confirmation leaves that run pending and stops later aliases. Retry the same selected runs after remote views converge; confirmed-absent aliases need no second DELETE. Earlier confirmed deletions and completed runs remain progress, while captured digests and graph protection remain intact. No automatic rollback, forced completion, or old-checkpoint repair is provided.
 
 ## Safety boundaries
 

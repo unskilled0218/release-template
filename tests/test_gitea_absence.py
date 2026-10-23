@@ -6,11 +6,12 @@ from pathlib import Path
 import tempfile
 import time
 import unittest
+from unittest.mock import patch
 from urllib.parse import parse_qs, unquote, urlsplit
 
 from release_template.adapters import Gitea
-from release_template.cleanup import abandon, apply, plan
-from release_template.core import ReleaseError, load, require
+from release_template.cleanup import abandon, apply, plan, protected_graph
+from release_template.core import ReleaseError, load, require, save
 from release_template.workflow import Workflow
 from tests.support import COMMIT, REVISION, FakeGitea, FakeRegistry, FakeRunner, configuration, evidence, package
 
@@ -31,7 +32,8 @@ class GiteaTransport:
     else:
       status, value = self.response(method, path, body)
     require(status in allowed, f"Remote operation failed with HTTP {status}; no response body logged")
-    return status, {}, json.dumps(value).encode() if status != 204 else b""
+    data = value if isinstance(value, bytes) else json.dumps(value).encode()
+    return status, {}, data if status != 204 else b""
 
   def response(self, method, path, body):
     parsed = urlsplit(path)
@@ -174,3 +176,285 @@ class GiteaAbsenceOperationTests(unittest.TestCase):
     self.assertFalse(load(old.state.path).get("abandoned", False))
     self.assertEqual(self.registry.resolve("application", tag), root)
     self.assertTrue(self.reopen().state.data["published"])
+
+
+class AbandonmentConfirmationTests(unittest.TestCase):
+  def setUp(self):
+    self.temporary = tempfile.TemporaryDirectory()
+    self.addCleanup(self.temporary.cleanup)
+    self.root = Path(self.temporary.name)
+    self.config = configuration()
+    self.config["images"].append({"name": "sidecar", "platforms": ["linux/amd64"]})
+    self.registry = FakeRegistry()
+    self.runner = FakeRunner(self.registry)
+    self.backend = FakeGitea(self.registry)
+    self.api = Gitea(self.config, "private-fixture-token")
+    self.transport = GiteaTransport(self.backend)
+    self.api.http = self.transport
+    self.current = self.reopen()
+    self.current.publish()
+    self.current_before = self.current.state.path.read_bytes()
+    self.calls_before = len(self.runner.calls)
+    self.evidence = evidence(self.root / "evidence.json")
+    self.transport.requests.clear()
+
+  def reopen(self):
+    return Workflow(self.root, self.config, "1.0.0", REVISION, self.runner, self.registry, self.api, COMMIT)
+
+  def old_run(self, version="0.9.0", names=("application",)):
+    old = Workflow(self.root, self.config, version, REVISION, self.runner, self.registry, self.api, COMMIT)
+    old.state.data["created"] -= 2 * 86400
+    for name in names:
+      tag = "rt-" + old.state.data["run"] + "-" + name
+      root = self.registry.add(name, tag, version)
+      old.state.intent("build:" + name, {"tag": tag})
+      old.state.data["outputs"][name] = {"digest": root}
+      old.state.data["staging"][name] = {"tag": tag, "digest": root}
+      self.backend.package_records.append(package(name, tag))
+    old.state.flush()
+    return old
+
+  def retire(self, *old_runs):
+    abandon(self.reopen(), [old.state.data["run"] for old in old_runs], 86400, self.evidence)
+
+  def package_path(self, old, name="application"):
+    return self.api.package_path(name, old.state.data["staging"][name]["tag"])
+
+  def assert_preserved(self, old, before, abandoned=False):
+    saved = load(old.state.path)
+    self.assertEqual(saved, before | ({"abandoned": True} if abandoned else {}))
+    self.assertEqual(self.current.state.path.read_bytes(), self.current_before)
+    self.current.verify_publication()
+    protected = protected_graph(self.current)
+    for name, output in before["outputs"].items():
+      self.assertIn(output["digest"], protected[name])
+    self.assertFalse(any(reference.startswith("sha256:") for kind, name, reference in self.backend.deleted))
+    self.assertFalse(any(call[:3] == ["docker", "buildx", "build"] for call in self.runner.calls[self.calls_before:]))
+
+  def test_success_requires_absence_and_repeated_invocation_does_not_delete_twice(self):
+    old = self.old_run()
+    before = load(old.state.path)
+    self.retire(old)
+    self.retire(old)
+    self.assert_preserved(old, before, abandoned=True)
+    tag = before["staging"]["application"]["tag"]
+    self.assertIsNone(self.registry.resolve("application", tag))
+    self.assertIsNone(self.backend.get(self.backend.package_path("application", tag), absent=True))
+    self.assertEqual(self.backend.deleted, [("package", "application", tag)])
+    self.assertEqual(self.transport.requests.count(("DELETE", self.package_path(old))), 1)
+
+  def test_successful_no_op_delete_leaves_checkpoint_pending(self):
+    old = self.old_run()
+    before = load(old.state.path)
+    with patch.object(self.backend, "delete_package", return_value=None):
+      with self.assertRaisesRegex(ReleaseError, "not yet absent"):
+        self.retire(old)
+    self.assert_preserved(old, before)
+    self.assertIsNotNone(self.registry.resolve("application", before["staging"]["application"]["tag"]))
+    self.assertEqual(self.transport.requests.count(("DELETE", self.package_path(old))), 1)
+    self.retire(old)
+    self.assert_preserved(old, before, abandoned=True)
+
+  def test_invalid_post_delete_confirmation_stops_and_verified_retry_skips_delete(self):
+    responses = ((200, None), (200, []), (200, "wrong shape"), (200, b"not-json"),
+                 (200, {"id": 99}), (401, {}), (403, {}), (500, {}))
+    for index, response in enumerate(responses):
+      with self.subTest(response=response):
+        old = self.old_run("0.9." + str(index))
+        before = load(old.state.path)
+        path = self.package_path(old)
+        delete = self.backend.delete_package
+        def delete_then_override(name, reference):
+          delete(name, reference)
+          self.transport.overrides["GET", path] = response
+        with patch.object(self.backend, "delete_package", side_effect=delete_then_override):
+          with self.assertRaises(ReleaseError):
+            self.retire(old)
+        self.assert_preserved(old, before)
+        self.assertIsNone(self.registry.resolve("application", before["staging"]["application"]["tag"]))
+        self.transport.overrides.clear()
+        self.retire(old)
+        self.assert_preserved(old, before, abandoned=True)
+        self.assertEqual(self.transport.requests.count(("DELETE", path)), 1)
+
+  def test_connectivity_failure_after_delete_leaves_run_pending_and_retry_reconciles(self):
+    old = self.old_run()
+    before = load(old.state.path)
+    path = self.package_path(old)
+    request = self.transport.request
+    def disconnected(method, target, *args, **kwargs):
+      if method == "GET" and target == path and self.backend.deleted:
+        raise ReleaseError("HTTPS operation failed; verify trust and connectivity")
+      return request(method, target, *args, **kwargs)
+    with patch.object(self.transport, "request", side_effect=disconnected):
+      with self.assertRaisesRegex(ReleaseError, "connectivity"):
+        self.retire(old)
+    self.assert_preserved(old, before)
+    self.retire(old)
+    self.assert_preserved(old, before, abandoned=True)
+    self.assertEqual(self.transport.requests.count(("DELETE", path)), 1)
+
+  def test_package_404_with_still_visible_registry_alias_cannot_complete(self):
+    old = self.old_run()
+    before = load(old.state.path)
+    tag = before["staging"]["application"]["tag"]
+    delete = self.backend.delete_package
+    def delete_with_stale_alias(name, reference):
+      delete(name, reference)
+      self.registry.aliases[name, reference] = before["outputs"][name]["digest"]
+    with patch.object(self.backend, "delete_package", side_effect=delete_with_stale_alias):
+      with self.assertRaisesRegex(ReleaseError, "registry alias is not yet absent"):
+        self.retire(old)
+    self.assert_preserved(old, before)
+    self.registry.aliases.pop(("application", tag))
+    self.retire(old)
+    self.assert_preserved(old, before, abandoned=True)
+    self.assertEqual(self.transport.requests.count(("DELETE", self.package_path(old))), 1)
+
+  def test_disagreement_in_either_remote_view_cannot_authorize_delete(self):
+    for index, missing in enumerate(("registry", "package")):
+      with self.subTest(missing=missing):
+        old = self.old_run("0.9." + str(index))
+        before = load(old.state.path)
+        tag = before["staging"]["application"]["tag"]
+        if missing == "registry":
+          self.registry.aliases.pop(("application", tag))
+        else:
+          self.backend.package_records = [item for item in self.backend.package_records if item["version"] != tag]
+        with self.assertRaisesRegex(ReleaseError, "presence differs"):
+          self.retire(old)
+        self.assert_preserved(old, before)
+        self.assertEqual(self.backend.deleted, [])
+        self.assertEqual(self.transport.requests.count(("DELETE", self.package_path(old))), 0)
+        self.assertIn(("GET", self.package_path(old)), self.transport.requests)
+
+  def test_absent_registry_does_not_bypass_malformed_package_evidence(self):
+    old = self.old_run()
+    before = load(old.state.path)
+    tag = before["staging"]["application"]["tag"]
+    self.registry.aliases.pop(("application", tag))
+    self.transport.overrides["GET", self.package_path(old)] = (200, None)
+    with self.assertRaises(ReleaseError):
+      self.retire(old)
+    self.assert_preserved(old, before)
+    self.assertEqual(self.backend.deleted, [])
+
+  def test_changed_digest_or_foreign_association_cannot_authorize_delete(self):
+    for index, change in enumerate(("digest", "association")):
+      with self.subTest(change=change):
+        old = self.old_run("0.9." + str(index))
+        before = load(old.state.path)
+        tag = before["staging"]["application"]["tag"]
+        if change == "digest":
+          self.registry.add("application", tag, "0.8.0")
+        else:
+          next(item for item in self.backend.package_records if item["version"] == tag)["repository"] = {"full_name": "foreign/project"}
+        with self.assertRaisesRegex(ReleaseError, "identity conflict|association differs"):
+          self.retire(old)
+        self.assert_preserved(old, before)
+        self.assertEqual(self.backend.deleted, [])
+
+  def test_lost_delete_response_reopens_checkpoint_and_never_repeats_delete(self):
+    for index, failure in enumerate((ReleaseError("Lost response"), SystemExit("Process stopped"))):
+      with self.subTest(failure=type(failure).__name__):
+        old = self.old_run("0.9." + str(index))
+        before = load(old.state.path)
+        delete = self.backend.delete_package
+        def accepted_then_lost(name, reference):
+          delete(name, reference)
+          raise failure
+        with patch.object(self.backend, "delete_package", side_effect=accepted_then_lost):
+          with self.assertRaises(type(failure)):
+            self.retire(old)
+        self.assert_preserved(old, before)
+        self.retire(old)
+        self.assert_preserved(old, before, abandoned=True)
+        self.assertEqual(self.transport.requests.count(("DELETE", self.package_path(old))), 1)
+
+  def test_interruption_before_or_after_checkpoint_save_retries_without_delete(self):
+    for index, boundary in enumerate(("before", "after")):
+      with self.subTest(boundary=boundary):
+        old = self.old_run("0.9." + str(index))
+        before = load(old.state.path)
+        def interrupted(path, value):
+          if boundary == "after":
+            save(path, value)
+          raise SystemExit("Stopped at abandonment checkpoint boundary")
+        with patch("release_template.core.save", side_effect=interrupted):
+          with self.assertRaises(SystemExit):
+            self.retire(old)
+        self.assert_preserved(old, before, abandoned=boundary == "after")
+        self.retire(old)
+        self.assert_preserved(old, before, abandoned=True)
+        self.assertEqual(self.transport.requests.count(("DELETE", self.package_path(old))), 1)
+
+  def test_later_alias_failure_keeps_run_pending_and_retry_skips_prior_alias(self):
+    old = self.old_run(names=("application", "sidecar"))
+    before = load(old.state.path)
+    path = self.package_path(old, "sidecar")
+    delete = self.backend.delete_package
+    def delete_then_null(name, reference):
+      delete(name, reference)
+      if name == "sidecar":
+        self.transport.overrides["GET", path] = (200, None)
+    with patch.object(self.backend, "delete_package", side_effect=delete_then_null):
+      with self.assertRaises(ReleaseError):
+        self.retire(old)
+    self.assert_preserved(old, before)
+    self.assertEqual(len(self.backend.deleted), 2)
+    self.transport.overrides.clear()
+    self.retire(old)
+    self.assert_preserved(old, before, abandoned=True)
+    self.assertEqual(len(self.backend.deleted), 2)
+
+  def test_first_uncertain_alias_stops_before_later_alias(self):
+    old = self.old_run(names=("application", "sidecar"))
+    before = load(old.state.path)
+    path = self.package_path(old)
+    delete = self.backend.delete_package
+    def delete_then_null(name, reference):
+      delete(name, reference)
+      self.transport.overrides["GET", path] = (200, None)
+    with patch.object(self.backend, "delete_package", side_effect=delete_then_null):
+      with self.assertRaises(ReleaseError):
+        self.retire(old)
+    self.assert_preserved(old, before)
+    self.assertEqual(len(self.backend.deleted), 1)
+    self.assertNotIn(("DELETE", self.package_path(old, "sidecar")), self.transport.requests)
+    self.transport.overrides.clear()
+    self.retire(old)
+    self.assert_preserved(old, before, abandoned=True)
+    self.assertEqual(len(self.backend.deleted), 2)
+
+  def test_multiple_runs_keep_confirmed_progress_when_later_run_fails(self):
+    old_runs = (self.old_run("0.8.0"), self.old_run("0.9.0"))
+    # The directory scan, not requested-ID order, determines per-run processing order.
+    by_path = {old.state.path: old for old in old_runs}
+    first, second = [by_path[path] for path in self.current.state.path.parent.glob("*.json") if path in by_path]
+    before_first, before_second = load(first.state.path), load(second.state.path)
+    path = self.package_path(second)
+    delete = self.backend.delete_package
+    def delete_then_null(name, reference):
+      delete(name, reference)
+      if reference == before_second["staging"][name]["tag"]:
+        self.transport.overrides["GET", path] = (200, None)
+    with patch.object(self.backend, "delete_package", side_effect=delete_then_null):
+      with self.assertRaises(ReleaseError):
+        self.retire(*old_runs)
+    self.assert_preserved(first, before_first, abandoned=True)
+    self.assert_preserved(second, before_second)
+    self.transport.overrides.clear()
+    self.retire(*old_runs)
+    self.assert_preserved(second, before_second, abandoned=True)
+    self.assertEqual(len(self.backend.deleted), 2)
+
+  def test_preexisting_abandoned_flag_does_not_skip_remote_validation(self):
+    old = self.old_run()
+    old.state.data["abandoned"] = True
+    old.state.flush()
+    before = load(old.state.path)
+    with patch.object(self.backend, "delete_package", return_value=None):
+      with self.assertRaisesRegex(ReleaseError, "not yet absent"):
+        self.retire(old)
+    self.assert_preserved(old, before)
+    self.assertEqual(self.transport.requests.count(("DELETE", self.package_path(old))), 1)
