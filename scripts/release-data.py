@@ -299,7 +299,7 @@ def auth(root, work):
   (work / "api.curl").write_text('header = "Authorization: token ' + token + '"\n')
   basic = base64.b64encode((username + ":" + token).encode()).decode()
   (work / "registry.curl").write_text('header = "Authorization: Basic ' + basic + '"\n')
-  original = Path(os.environ.get("DOCKER_CONFIG", str(Path.home() / ".docker")))
+  original = Path(os.environ.get("DOCKER_CONFIG") or str(Path.home() / ".docker"))
   docker = work / "docker"
   docker.mkdir()
   write(docker / "config.json", {"auths": {urlsplit(config["gitea"]).netloc: {}}})

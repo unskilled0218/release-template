@@ -44,7 +44,7 @@ def helper_module():
 
 class BashPublicationTests(unittest.TestCase):
   def setUp(self):
-    self.temporary = tempfile.TemporaryDirectory(prefix="bash-release-test-")
+    self.temporary = tempfile.TemporaryDirectory(prefix="bash-release-test-", dir="/tmp/opencode" if Path("/tmp/opencode").is_dir() else None)
     self.addCleanup(self.temporary.cleanup)
     self.base = Path(self.temporary.name)
     self.root, self.bin = self.base / "project", self.base / "bin"
@@ -70,7 +70,8 @@ class BashPublicationTests(unittest.TestCase):
       "GIT_AUTHOR_EMAIL": "fixture@localhost", "GIT_COMMITTER_EMAIL": "fixture@localhost",
       "BASH_TEST_STATE": str(self.base), "PATH": str(self.bin) + ":" + os.environ["PATH"],
       "TMPDIR": str(self.base), "HOME": str(self.base)}
-    for key in ("GIT_TOKEN", "GIT_USERNAME", "RELEASE_LOCK_FD", "DOCKER_CONTEXT", "DOCKER_CONFIG", "BUILDX_CONFIG"):
+    for key in ("GIT_TOKEN", "GIT_USERNAME", "RELEASE_LOCK_FD", "DOCKER_CONTEXT", "DOCKER_CONFIG", "BUILDX_CONFIG",
+                "DOCKER_HOST", "DOCKER_TLS_VERIFY", "DOCKER_CERT_PATH", "BUILDX_BUILDER"):
       self.environment.pop(key, None)
     port = ROOT / "tests/fixtures/bash_release_ports.py"
     for name in ("git", "curl", "docker"):
@@ -110,6 +111,226 @@ class BashPublicationTests(unittest.TestCase):
 
   def assert_no_writes(self):
     self.assertFalse(set(self.events()) & {"build", "tag-push", "promote", "release-post"}, self.events())
+
+  def predecessor(self):
+    data = helper_module()
+    body = data.canonical({"previous": "verified fixture alias"})
+    reference = data.sha(body)
+    state = self.state()
+    state["objects"][reference] = body.decode()
+    state["aliases"]["latest"] = reference
+    self.change(**state)
+    return reference
+
+  def connection(self, context=None, host=None, configured=None, explicit_builder=False):
+    directory = self.base / "original-docker"
+    directory.mkdir(exist_ok=True)
+    config = {"auths": {"foreign.invalid": {"auth": "UNRELATED_AUTH_SENTINEL"}},
+              "credsStore": "must-not-run", "credHelpers": {"foreign.invalid": "must-not-run"}}
+    if configured:
+      config["currentContext"] = configured
+    (directory / "config.json").write_text(json.dumps(config))
+    named = context if context and context != "default" else configured
+    if named:
+      metadata = directory / "contexts/meta/fixture-id/meta.json"
+      metadata.parent.mkdir(parents=True, exist_ok=True)
+      metadata.write_text(json.dumps({"Name": named, "Endpoints": {"docker": {"Host": "tcp://context.fixture.invalid:2376"}}}))
+      tls = directory / "contexts/tls/fixture-id/docker/ca.pem"
+      tls.parent.mkdir(parents=True, exist_ok=True)
+      tls.write_text("fixture-ca")
+    buildx = self.base / "selected-buildx" if explicit_builder else directory / "buildx"
+    buildx.mkdir(exist_ok=True)
+    (buildx / "current").write_text(json.dumps({"Name": "fixture-builder"}))
+    self.environment["DOCKER_CONFIG"] = str(directory)
+    if context is not None:
+      self.environment["DOCKER_CONTEXT"] = context
+    else:
+      self.environment.pop("DOCKER_CONTEXT", None)
+    if host:
+      self.environment["DOCKER_HOST"] = host
+    else:
+      self.environment.pop("DOCKER_HOST", None)
+    certificates = self.base / "host-certificates"
+    certificates.mkdir(exist_ok=True)
+    (certificates / "ca.pem").write_text("fixture-host-ca")
+    if host or named:
+      self.environment |= {"DOCKER_TLS_VERIFY": "1", "DOCKER_CERT_PATH": str(certificates)}
+    else:
+      self.environment.pop("DOCKER_TLS_VERIFY", None)
+      self.environment.pop("DOCKER_CERT_PATH", None)
+    if explicit_builder:
+      self.environment["BUILDX_CONFIG"] = str(buildx)
+    else:
+      self.environment.pop("BUILDX_CONFIG", None)
+    return directory
+
+  def assert_connection_preserved(self, expected_endpoint, expected_builder="fixture-builder"):
+    selections = [json.loads(line) for line in (self.base / "docker-selections").read_text().splitlines()]
+    operations = {tuple(row["operation"]) for row in selections}
+    self.assertTrue({("buildx", "inspect"), ("login", "git.lan"), ("buildx", "build"), ("buildx", "imagetools")} <= operations)
+    self.assertEqual({row["endpoint"] for row in selections}, {expected_endpoint})
+    self.assertEqual({row["builder"] for row in selections}, {expected_builder})
+    self.assertEqual({row["tls_verify"] for row in selections}, {self.environment.get("DOCKER_TLS_VERIFY")})
+    self.assertEqual({row["cert_path"] for row in selections}, {self.environment.get("DOCKER_CERT_PATH")})
+
+  def assert_promotion_read_refuses(self, fault):
+    predecessor = self.predecessor()
+    self.change(promotion_read_fault=fault)
+    result = self.release()
+    events = self.events()
+    injection = "promotion-read-injected:" + fault
+    self.assertIn(injection, events, "The precise post-guard read must receive the fault")
+    self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+    self.assertNotIn("Publication verified", result.stdout)
+    self.assertFalse(set(events[events.index(injection) + 1:]) & {"build", "tag-push", "promote", "release-post"})
+    self.assertEqual(events.count("build"), 1)
+    self.assertEqual(events.count("tag-push"), 1)
+    self.assertEqual(self.state()["aliases"]["latest"], predecessor)
+    self.assertEqual(self.state()["releases"], [])
+
+  def assert_tag_change_refuses(self, stage, kind="absent"):
+    predecessor = self.predecessor()
+    self.change(tag_change={"stage": stage, "kind": kind})
+    result = self.release()
+    events = self.events()
+    injection = "tag-change:" + stage + ":" + kind
+    self.assertIn(injection, events)
+    self.assertLess(events.index("tag-confirmed"), events.index(injection))
+    self.assertNotEqual(result.returncode, 0)
+    self.assertNotIn("Publication verified", result.stdout)
+    self.assertFalse(set(events[events.index(injection) + 1:]) & {"build", "tag-push", "promote", "release-post"})
+    self.assertEqual(events.count("tag-push"), 1)
+    self.assertEqual(events.count("promote"), int(stage == "before_release"))
+    self.assertEqual(events.count("release-post"), 0)
+    self.assertEqual(self.state()["aliases"]["latest"], self.state()["prepared"] if stage == "before_release" else predecessor)
+    if kind == "absent":
+      self.assertEqual(self.git("ls-remote", "--tags", "origin", "refs/tags/v1.0.0"), "")
+    annotation = self.git("cat-file", "tag", self.state()["confirmed_object"])
+    identity = json.loads(annotation.split("\n\n", 1)[1].split("\n", 1)[1])
+    self.assertEqual(identity["digest"], self.state()["prepared"])
+    self.assertEqual(identity["predecessor"], predecessor)
+    self.assertEqual(identity["commit"], self.git("rev-parse", "HEAD"))
+
+  def test_promotion_read_overflow_blocks_later_writes(self):
+    self.assert_promotion_read_refuses("overflow")
+
+  def test_promotion_read_malformed_json_blocks_later_writes(self):
+    self.assert_promotion_read_refuses("malformed")
+
+  def test_promotion_read_null_blocks_later_writes(self):
+    self.assert_promotion_read_refuses("null")
+
+  def test_promotion_read_unauthorized_blocks_later_writes(self):
+    self.assert_promotion_read_refuses("unauthorized")
+
+  def test_promotion_read_server_error_blocks_later_writes(self):
+    self.assert_promotion_read_refuses("server_error")
+
+  def test_promotion_read_transport_failure_blocks_later_writes(self):
+    self.assert_promotion_read_refuses("transport")
+
+  def test_promotion_read_timeout_failure_blocks_later_writes(self):
+    self.assert_promotion_read_refuses("timeout")
+
+  def test_promotion_read_foreign_alias_is_not_overwritten(self):
+    predecessor = self.predecessor()
+    self.change(promotion_read_fault="foreign")
+    result = self.release()
+    events = self.events()
+    self.assertIn("promotion-read-injected:foreign", events)
+    self.assertNotEqual(result.returncode, 0)
+    self.assertNotIn("promote", events)
+    self.assertNotIn("release-post", events)
+    self.assertNotIn(self.state()["aliases"]["latest"], (predecessor, self.state()["prepared"]))
+
+  def test_promotion_read_prepared_alias_skips_duplicate_promotion(self):
+    self.change(promotion_read_fault="prepared")
+    result = self.release()
+    self.assertEqual(result.returncode, 0, result.stderr)
+    self.assertIn("promotion-read-injected:prepared", self.events())
+    self.assertNotIn("promote", self.events())
+    self.assertEqual(self.events().count("release-post"), 1)
+
+  def test_confirmed_tag_disappearance_stops_before_promotion(self):
+    self.assert_tag_change_refuses("before_promotion")
+
+  def test_confirmed_tag_disappearance_after_promotion_stops_before_release(self):
+    self.assert_tag_change_refuses("before_release")
+
+  def test_confirmed_tag_lightweight_replacement_refuses(self):
+    self.assert_tag_change_refuses("before_promotion", "lightweight")
+
+  def test_confirmed_tag_foreign_annotation_refuses(self):
+    self.assert_tag_change_refuses("before_promotion", "changed")
+
+  def test_confirmed_tag_wrong_peeled_commit_refuses(self):
+    self.assert_tag_change_refuses("before_promotion", "wrong_peel")
+
+  def test_host_only_connection_is_preserved(self):
+    self.connection(host="tcp://host.fixture.invalid:2376")
+    result = self.release()
+    self.assertEqual(result.returncode, 0, result.stderr)
+    self.assert_connection_preserved("tcp://host.fixture.invalid:2376")
+
+  def test_empty_context_preserves_host_connection(self):
+    self.connection(context="", host="tcp://host.fixture.invalid:2376", explicit_builder=True)
+    result = self.release()
+    self.assertEqual(result.returncode, 0, result.stderr)
+    self.assert_connection_preserved("tcp://host.fixture.invalid:2376")
+
+  def test_config_selected_named_context_is_preserved(self):
+    self.connection(configured="remote-builder")
+    result = self.release()
+    self.assertEqual(result.returncode, 0, result.stderr)
+    self.assert_connection_preserved("tcp://context.fixture.invalid:2376")
+
+  def test_explicit_named_context_keeps_precedence_over_host(self):
+    self.connection(context="remote-builder", host="tcp://ignored.fixture.invalid:2376", explicit_builder=True)
+    result = self.release()
+    self.assertEqual(result.returncode, 0, result.stderr)
+    self.assert_connection_preserved("tcp://context.fixture.invalid:2376")
+
+  def test_explicit_default_context_keeps_precedence_over_host(self):
+    self.connection(context="default", host="tcp://ignored.fixture.invalid:2376")
+    result = self.release()
+    self.assertEqual(result.returncode, 0, result.stderr)
+    self.assert_connection_preserved("unix:///var/run/docker.sock")
+
+  def test_default_connection_and_builder_are_preserved(self):
+    self.connection()
+    result = self.release()
+    self.assertEqual(result.returncode, 0, result.stderr)
+    self.assert_connection_preserved("unix:///var/run/docker.sock")
+
+  def test_relative_host_cert_and_buildx_paths_are_preserved(self):
+    self.connection(host="tcp://host.fixture.invalid:2376", explicit_builder=True)
+    for key in ("DOCKER_CONFIG", "DOCKER_CERT_PATH", "BUILDX_CONFIG"):
+      self.environment[key] = str(Path(self.environment[key]).relative_to(self.base))
+    result = self.release()
+    self.assertEqual(result.returncode, 0, result.stderr)
+    self.assert_connection_preserved("tcp://host.fixture.invalid:2376")
+
+  def test_empty_docker_config_uses_home_context_metadata(self):
+    directory = self.connection(configured="remote-builder")
+    directory.rename(self.base / ".docker")
+    self.environment["DOCKER_CONFIG"] = ""
+    result = self.release()
+    self.assertEqual(result.returncode, 0, result.stderr)
+    self.assert_connection_preserved("tcp://context.fixture.invalid:2376")
+
+  def test_explicit_builder_selection_is_preserved(self):
+    self.connection(host="tcp://host.fixture.invalid:2376")
+    self.environment["BUILDX_BUILDER"] = "environment-builder"
+    result = self.release()
+    self.assertEqual(result.returncode, 0, result.stderr)
+    self.assert_connection_preserved("tcp://host.fixture.invalid:2376", "environment-builder")
+
+  def test_unusable_named_context_does_not_fall_back_or_publish(self):
+    directory = self.connection(configured="remote-builder")
+    (directory / "contexts/tls/fixture-id/docker/ca.pem").unlink()
+    result = self.release()
+    self.assertNotEqual(result.returncode, 0)
+    self.assert_no_writes()
 
   def test_publish_and_completed_retry_ignore_missing_or_foreign_staging(self):
     result = self.release()
@@ -371,6 +592,25 @@ class BashPublicationTests(unittest.TestCase):
 class BashDataTests(unittest.TestCase):
   def setUp(self):
     self.data = helper_module()
+
+  def test_guard_read_failures_remain_fatal_in_conditional_callers(self):
+    script = '''set -Eeuo pipefail
+source "$1"
+root=unused work=unused commit=unused predecessor='' prepared=digest
+fault_status=$3
+data() { return "$fault_status"; }
+if "$2"; then echo continued; fi
+'''
+    for helper, message in (("scan", "Cannot verify captured source"),
+                            ("tag_state", "Cannot read observed tag object"),
+                            ("alias_guard", "Cannot verify latest alias")):
+      for status in (1, 2):
+        with self.subTest(helper=helper, status=status):
+          result = subprocess.run(["bash", "-c", script, "fixture", str(ROOT / "scripts/release-common.sh"), helper, str(status)],
+                                  capture_output=True, text=True)
+          self.assertNotEqual(result.returncode, 0)
+          self.assertIn(message, result.stderr)
+          self.assertNotIn("continued", result.stdout)
 
   def test_bounded_capture_exact_limit_and_overflow(self):
     output = self.data.command([sys.executable, "-c", "import sys; sys.stdout.buffer.write(b'x'*64)"], 64)

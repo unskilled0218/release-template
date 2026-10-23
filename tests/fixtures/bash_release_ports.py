@@ -38,6 +38,32 @@ def store(value):
   return digest
 
 
+def docker_selection():
+  directory = Path(os.environ.get("DOCKER_CONFIG") or str(Path.home() / ".docker"))
+  configuration = json.loads((directory / "config.json").read_text()) if (directory / "config.json").exists() else {}
+  explicit = os.environ.get("DOCKER_CONTEXT") or None
+  host = os.environ.get("DOCKER_HOST") or None
+  context = explicit or ("default" if host else configuration.get("currentContext", "default"))
+  if context == "default":
+    endpoint = host if host and not explicit else "unix:///var/run/docker.sock"
+    tls = "host-tls" if host and not explicit and os.environ.get("DOCKER_TLS_VERIFY") else "local"
+    if tls == "host-tls":
+      assert (Path(os.environ["DOCKER_CERT_PATH"]) / "ca.pem").read_text() == "fixture-host-ca"
+  else:
+    records = [path for path in (directory / "contexts/meta").glob("*/meta.json")
+               if json.loads(path.read_text()).get("Name") == context]
+    assert len(records) == 1, "Named context metadata must remain usable"
+    metadata = json.loads(records[0].read_text())
+    endpoint = metadata["Endpoints"]["docker"]["Host"]
+    assert (directory / "contexts/tls" / records[0].parent.name / "docker/ca.pem").read_text() == "fixture-ca"
+    tls = "context-tls"
+  buildx = Path(os.environ.get("BUILDX_CONFIG") or str(directory / "buildx"))
+  current = json.loads((buildx / "current").read_text()) if (buildx / "current").exists() else {}
+  builder = os.environ.get("BUILDX_BUILDER") or current.get("Name", "default")
+  return {"operation": arguments[:2], "context": context, "endpoint": endpoint, "tls": tls, "builder": builder,
+          "tls_verify": os.environ.get("DOCKER_TLS_VERIFY"), "cert_path": os.environ.get("DOCKER_CERT_PATH")}
+
+
 if tool == "git":
   if "remote" in arguments and "get-url" in arguments:
     print("https://git.lan/" + ("foreign/project.git" if state.get("wrong_remote") else "fixtures/application.git"))
@@ -48,24 +74,67 @@ if tool == "git":
   is_push = "push" in arguments
   if is_push:
     event("tag-push")
-  result = subprocess.run(["/usr/bin/git", *arguments])
+  tags = "ls-remote" in arguments and "--tags" in arguments
+  pushed = "tag-push" in (base / "events").read_text().splitlines() if (base / "events").exists() else False
+  if tags and pushed:
+    state["post_push_scans"] = state.get("post_push_scans", 0) + 1
+    fault = state.get("tag_change")
+    promoted = "promote" in (base / "events").read_text().splitlines()
+    if fault and ((fault["stage"] == "before_promotion" and state["post_push_scans"] == 2) or
+                  (fault["stage"] == "before_release" and promoted)):
+      state.pop("tag_change")
+      event("tag-change:" + fault["stage"] + ":" + fault["kind"])
+      reference = "refs/tags/v1.0.0"
+      remote = ["/usr/bin/git", "--git-dir", str(base / "remote.git")]
+      if fault["kind"] == "absent":
+        subprocess.run([*remote, "update-ref", "-d", reference], check=True)
+      elif fault["kind"] == "lightweight":
+        commit = subprocess.check_output([*remote, "rev-parse", "main"], text=True).strip()
+        subprocess.run([*remote, "update-ref", reference, commit], check=True)
+      elif fault["kind"] == "changed":
+        commit = subprocess.check_output([*remote, "rev-parse", "main"], text=True).strip()
+        content = "object " + commit + "\ntype commit\ntag v1.0.0\ntagger Fixture <fixture@localhost> 0 +0000\n\nForeign annotation\n"
+        oid = subprocess.check_output([*remote, "mktag"], input=content, text=True).strip()
+        subprocess.run([*remote, "update-ref", reference, oid], check=True)
+      elif fault["kind"] == "wrong_peel":
+        state["wrong_peel"] = True
+    save()
+  if tags:
+    result = subprocess.run(["/usr/bin/git", *arguments], capture_output=True)
+    output = result.stdout
+    if state.get("wrong_peel"):
+      output = b"\n".join((b"a" * 40 + b"\t" + line.split(b"\t", 1)[1])
+                          if line.endswith(b"refs/tags/v1.0.0^{}") else line for line in output.split(b"\n"))
+    if pushed and state["post_push_scans"] == 1 and result.returncode == 0:
+      event("tag-confirmed")
+      state["confirmed_object"] = next(line.split()[0].decode() for line in output.splitlines()
+                                       if line.endswith(b"\trefs/tags/v1.0.0"))
+      save()
+    sys.stdout.buffer.write(output)
+    sys.stderr.buffer.write(result.stderr)
+  else:
+    result = subprocess.run(["/usr/bin/git", *arguments])
   if is_push and state.pop("lose_tag", False):
     save()
     sys.exit(1)
   sys.exit(result.returncode)
 
 if tool == "docker":
+  selection = docker_selection()
+  with (base / "docker-selections").open("a") as output:
+    output.write(json.dumps(selection) + "\n")
   if arguments[:2] == ["buildx", "inspect"]:
     event("builder")
     print("Platforms: " + ("linux/amd64" if state.get("unsupported") else "linux/amd64, linux/arm64"))
   elif arguments[:2] == ["context", "show"]:
-    print("default")
+    print(selection["context"])
   elif arguments[0] == "login":
     event("login")
     assert sys.stdin.read() == "SENTINEL_PRIVATE_TOKEN"
     config = json.loads((Path(os.environ["DOCKER_CONFIG"]) / "config.json").read_text())
     assert "credsStore" not in config and "credHelpers" not in config
     assert "SENTINEL_PRIVATE_TOKEN" not in json.dumps(config)
+    assert "UNRELATED_AUTH_SENTINEL" not in json.dumps(config)
   elif arguments[:2] == ["buildx", "build"]:
     event("build")
     if state.get("hang_build"):
@@ -139,6 +208,19 @@ elif route.endswith("/tags"):
   body = [{"name": name} for name in refs.splitlines()] if page == 1 else []
 elif route.startswith("/v2/"):
   reference = route.rsplit("/", 1)[1]
+  fault = None
+  if reference == "latest" and "tag-confirmed" in (base / "events").read_text().splitlines() and "promote" not in (base / "events").read_text().splitlines():
+    state["promotion_reads"] = state.get("promotion_reads", 0) + 1
+    if state["promotion_reads"] == 2 and state.get("promotion_read_fault"):
+      fault = state.pop("promotion_read_fault")
+      event("promotion-read-injected:" + fault)
+      if fault == "foreign":
+        state["aliases"]["latest"] = store({"foreign": True})
+      elif fault == "prepared":
+        state["aliases"]["latest"] = state["prepared"]
+    save()
+  if fault in ("transport", "timeout"):
+    sys.exit(28 if fault == "timeout" else 7)
   if state.get("realm_foreign"):
     status, body = 401, {}
     headers["WWW-Authenticate"] = 'Bearer realm="https://foreign.invalid/token",service="test"'
@@ -155,6 +237,17 @@ else:
 if state.get("status"):
   status = state["status"]
 data = encode(body)
+if route.startswith("/v2/"):
+  if fault == "overflow":
+    data = b" " * 4194305
+  elif fault == "malformed":
+    data = b"{broken"
+  elif fault == "null":
+    data = b"null"
+  elif fault in ("unauthorized", "server_error"):
+    status = 401 if fault == "unauthorized" else 500
+  if fault not in (None, "foreign", "prepared"):
+    headers.pop("Docker-Content-Digest", None)
 if state.get("oversized"):
   data = b" " * 4194305
 if state.get("malformed"):

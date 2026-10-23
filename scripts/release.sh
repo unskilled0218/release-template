@@ -48,19 +48,26 @@ image=$(field "$work/settings.json" image)
 printf 'Release target: %s / %s (%s)\n' "$repository" "$image" "$tag"
 [[ ! -e "$root/.release-template/$tag.json" && ! -L "$root/.release-template/$tag.json" ]] || stop 'Legacy checkpoint exists; preserve its original checkout/pin'
 phase='source and builder preflight'
+original_docker_context=${DOCKER_CONTEXT-}
+original_docker_config=${DOCKER_CONFIG:-$HOME/.docker}
 run 1048576 60 docker buildx inspect --bootstrap
 data platforms "$work/command.out"
-commit=$(data source "$root")
+commit=$(data source "$root") || stop 'Cannot verify release source'
 # Validate captured notes before reading credentials or doing any registry write.
 data payload "$root" "$commit" "$work/payload.json"
 data auth "$root" "$work"
 registry_host=${image%%/*}
-original_docker_config=${DOCKER_CONFIG:-$HOME/.docker}
 export BUILDX_CONFIG=${BUILDX_CONFIG:-$original_docker_config/buildx}
 run 65536 60 docker context show
-context=$(cat "$work/command.out")
+context=$(cat "$work/command.out") || stop 'Cannot read selected Docker context'
+[[ -n "$context" && "$context" != *$'\n'* && "$context" != *$'\r'* ]] || stop 'Invalid selected Docker context'
 export DOCKER_CONFIG="$work/docker"
-export DOCKER_CONTEXT="$context"
+# Selecting default here would override an otherwise host-only connection.
+if [[ "$context" != default || -n "$original_docker_context" ]]; then
+  export DOCKER_CONTEXT="$context"
+else
+  unset DOCKER_CONTEXT
+fi
 phase='read-only startup classification'
 data inventory "$root" "$work" "$work/inventory.json"
 tag_state
@@ -83,12 +90,13 @@ if [[ -n "$remote_oid" || -n "$release_record" ]]; then
   exit 0
 fi
 phase='fresh-publication preparation'
+tag_confirmed=false
 run 65536 60 git -C "$root" tag --list "$tag"
 [[ ! -s "$work/command.out" ]] || stop 'Local tag exists without a remote publication; inspect before building'
-predecessor=$(data resolve "$root" "$work" latest)
+predecessor=$(data resolve "$root" "$work" latest) || stop 'Cannot capture predecessor alias'
 config_hash=$(field "$work/settings.json" config_hash)
 staging="rt-${version}-${commit}-${config_hash#sha256:}"
-prepared=$(data image "$root" "$work" "$staging" "$commit" missing)
+prepared=$(data image "$root" "$work" "$staging" "$commit" missing) || stop 'Cannot verify staging evidence'
 if [[ -z "$prepared" ]]; then
   fresh_guard
   login
@@ -98,12 +106,12 @@ if [[ -z "$prepared" ]]; then
     --metadata-file "$work/build.json" --push --tag "$image:$staging" \
     --label "org.opencontainers.image.version=$version" --label "org.opencontainers.image.revision=$commit" \
     --label "org.opencontainers.image.source=$origin/$repository" --file "$work/source/Dockerfile" "$work/source"
-  prepared=$(data image "$root" "$work" "$staging" "$commit")
+  prepared=$(data image "$root" "$work" "$staging" "$commit") || stop 'Cannot verify built image'
   data metadata "$work/build.json" "$prepared"
 else
   login
 fi
-oid=$(data make-tag "$root" "$commit" "$prepared" "$predecessor" "$work/identity.json")
+oid=$(data make-tag "$root" "$commit" "$prepared" "$predecessor" "$work/identity.json") || stop 'Cannot create exact intended tag'
 phase='tag publication'
 fresh_guard
 # A failed response may follow an accepted write. Reconcile exactly; never force or roll back.
@@ -111,9 +119,12 @@ attempt run 1048576 60 git -C "$root" push origin "$oid:refs/tags/$tag"
 scan
 tag_state
 [[ "$remote_oid" == "$oid" && "$remote_commit" == "$commit" && -z "$release_record" ]] || stop 'Tag push not confirmed or release appeared'
+tag_confirmed=true
 phase='digest promotion'
 fresh_guard
-if [[ $(data resolve "$root" "$work" latest) != "$prepared" ]]; then
+promotion_latest=$(data resolve "$root" "$work" latest) || stop 'Cannot read latest before promotion'
+[[ "$promotion_latest" == "$predecessor" || "$promotion_latest" == "$prepared" ]] || stop 'Latest changed before promotion'
+if [[ "$promotion_latest" != "$prepared" ]]; then
   attempt run 1048576 60 docker buildx imagetools create --tag "$image:latest" "$image@$prepared"
 fi
 [[ $(data resolve "$root" "$work" latest) == "$prepared" ]] || stop 'Promotion not confirmed'
