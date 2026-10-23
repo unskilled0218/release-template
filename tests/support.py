@@ -5,6 +5,7 @@ from pathlib import Path
 
 from release_template.core import ReleaseError, digest
 from release_template.policy import description
+from release_template.oci import OCI_MANIFEST, IMAGE_CONFIGS
 
 
 COMMIT = "a" * 40
@@ -22,10 +23,12 @@ class FakeRegistry:
   def __init__(self):
     self.aliases, self.images = {}, {}
 
-  def add(self, name, tag, release_version, commit=COMMIT, source="https://forgejo.invalid/fixtures/application"):
+  def add(self, name, tag, release_version, commit=COMMIT, source="https://forgejo.invalid/fixtures/application",
+          platforms=("linux/amd64", "linux/arm64")):
     root = digest((name + release_version + commit).encode())
     child = digest((root + "child").encode())
-    self.images[name, root] = {"version": release_version, "commit": commit, "source": source, "graph": {root, child}}
+    self.images[name, root] = {"version": release_version, "commit": commit, "source": source, "graph": {root, child},
+                             "platforms": platforms}
     self.images[name, child] = self.images[name, root]
     self.aliases[name, tag] = root
     return root
@@ -36,15 +39,29 @@ class FakeRegistry:
     return self.aliases.get((name, reference))
 
   def verify(self, name, root, platforms, commit, release_version, source):
-    image = self.images[name, root]
-    if (image["commit"], image["version"], image["source"]) != (commit, release_version, source):
-      raise ReleaseError("Fake image labels differ")
-    return image["graph"]
+    from release_template.adapters import Registry
+    return Registry.verify(self, name, root, platforms, commit, release_version, source)
 
   def graph(self, name, root):
     image = self.images[name, root]
-    return image["graph"], [{"os": "linux", "architecture": "amd64", "config": {"Labels": {
-      "org.opencontainers.image.version": image["version"], "org.opencontainers.image.source": image["source"]}}}]
+    if "evidence" in image:
+      return image["graph"], image["evidence"]
+    nodes, descriptors = {}, []
+    for platform in image["platforms"]:
+      os_name, architecture = platform.split("/")
+      reference = digest((root + platform).encode())
+      descriptor = {"digest": reference, "platform": {"os": os_name, "architecture": architecture}}
+      descriptors.append(descriptor)
+      nodes[reference] = {"digest": reference, "incoming": [{"kind": "member", "descriptor": descriptor}],
+        "manifest": {"schemaVersion": 2, "mediaType": OCI_MANIFEST,
+                     "config": {"mediaType": IMAGE_CONFIGS[0]}, "layers": []},
+        "configuration": {"os": os_name, "architecture": architecture, "config": {"Labels": {
+          "org.opencontainers.image.revision": image["commit"],
+          "org.opencontainers.image.version": image["version"], "org.opencontainers.image.source": image["source"]}}}}
+    nodes[root] = {"digest": root, "incoming": [{"kind": "root", "descriptor": {"digest": root}}],
+      "configuration": None, "manifest": {"schemaVersion": 2,
+        "mediaType": "application/vnd.oci.image.index.v1+json", "manifests": descriptors}}
+    return image["graph"] | set(nodes), {"root": root, "nodes": nodes}
 
 
 class FakeForgejo:
@@ -89,6 +106,8 @@ class FakeForgejo:
     self.deleted.append(("package", name, reference))
     self.package_records = [item for item in self.package_records if (item["name"], item["version"]) != (name, reference)]
     self.registry.aliases.pop((name, reference), None)
+    if reference.startswith("sha256:"):
+      self.registry.images.pop((name, reference), None)
 
   def delete_release(self, release_id):
     self.deleted.append(("release", release_id))
@@ -151,7 +170,8 @@ class FakeRunner:
     if arguments[:3] == ["docker", "buildx", "build"]:
       reference = arguments[arguments.index("--tag") + 1]
       name, tag = reference.rsplit("/", 1)[1].split(":")
-      self.registry.add(name, tag, self.release_version)
+      platforms = arguments[arguments.index("--platform") + 1].split(",")
+      self.registry.add(name, tag, self.release_version, platforms=platforms)
       if self.kill_build:
         self.kill_build = False
         raise SystemExit("Lost build response")
@@ -169,7 +189,7 @@ class FakeRunner:
       inputs = json.loads(extra["RELEASE_INPUT_JSON"])
       self.last_build_inputs = inputs
       name, tag = inputs["staging"].rsplit("/", 1)[1].split(":")
-      self.registry.add(name, tag, self.release_version)
+      self.registry.add(name, tag, self.release_version, platforms=inputs["platforms"])
       return ""
     if arguments[:3] == ["docker", "buildx", "version"]:
       return "buildx fixture"

@@ -216,6 +216,8 @@ class WorkflowTests(unittest.TestCase):
     old_digest = first.state.data["outputs"]["application"]["digest"]
     self.registry.aliases["application", "v1.0.0"] = old_digest
     current = second.state.data["outputs"]["application"]["digest"]
+    self.registry.aliases["application", "custom"] = current
+    self.registry.aliases["application", "v0.2.0"] = current
     self.forgejo.package_records = [package("application", "v1.0.0"), package("application", "latest"),
       package("application", current), package("application", "custom"),
       package("other", "v0.1.0"), package("application", "v0.2.0", "other/repo")]
@@ -287,3 +289,201 @@ class WorkflowTests(unittest.TestCase):
     abandon(second, [interrupted.state.data["run"]], 86400, evidence_path)
     self.assertTrue(load(interrupted.state.path)["abandoned"])
     self.assertEqual(len(self.forgejo.deleted), 1)
+
+  def test_preserved_alias_protects_completed_older_graph_in_either_inventory_order(self):
+    old = self.workflow()
+    old.publish()
+    apply(old, evidence(self.root / "evidence.json"))
+    current = self.workflow("2.0.0")
+    current.publish()
+    digest = old.state.data["outputs"]["application"]["digest"]
+    for alias in ("custom", "v1.0.0-rc.1", "v9.0.0", "rt-external-application"):
+      self.registry.aliases["application", alias] = digest
+      for reverse in (False, True):
+        with self.subTest(alias=alias, reverse=reverse):
+          records = [package("application", alias), package("application", digest)]
+          self.forgejo.package_records = list(reversed(records)) if reverse else records
+          self.assertFalse(any(item.get("version") == digest for item in plan(current)["candidates"]))
+      self.registry.aliases.pop(("application", alias))
+
+  def test_saved_digest_candidate_cannot_ignore_new_unscheduled_older_alias(self):
+    old = self.workflow()
+    old.publish()
+    apply(old, evidence(self.root / "evidence.json"))
+    current = self.workflow("2.0.0")
+    current.publish()
+    digest = old.state.data["outputs"]["application"]["digest"]
+    self.forgejo.package_records = [package("application", digest)]
+    current.state.data["cleanup"] = plan(current)
+    current.state.flush()
+    self.registry.aliases["application", "v0.9.0"] = digest
+    self.forgejo.package_records.append(package("application", "v0.9.0"))
+    self.forgejo.deleted.clear()
+    with self.assertRaises(ReleaseError):
+      apply(current, self.root / "evidence.json")
+    self.assertNotIn(("package", "application", digest), self.forgejo.deleted)
+
+  def completed_history(self):
+    old = self.workflow()
+    old.publish()
+    evidence_path = evidence(self.root / "evidence.json")
+    apply(old, evidence_path)
+    current = self.workflow("2.0.0")
+    current.publish()
+    return current, old.state.data["outputs"]["application"]["digest"], evidence_path
+
+  def test_preserved_nested_graph_survives_apply_while_unreferenced_digest_is_deleted(self):
+    current, old_digest, evidence_path = self.completed_history()
+    old_image = self.registry.images["application", old_digest]
+    child = next(item for item in old_image["graph"] if item != old_digest)
+    self.registry.aliases["application", "custom"] = old_digest
+    orphan = self.registry.add("application", "unlisted", "0.5.0")
+    self.registry.aliases.pop(("application", "unlisted"))
+    self.forgejo.package_records = [package("application", child), package("application", old_digest),
+      package("application", "custom"), package("application", orphan)]
+    with self.assertRaisesRegex(ReleaseError, "ambiguous"):
+      apply(current, evidence_path)
+    self.assertIn(("package", "application", orphan), self.forgejo.deleted)
+    self.assertNotIn(("package", "application", old_digest), self.forgejo.deleted)
+    self.assertNotIn(("package", "application", child), self.forgejo.deleted)
+    self.assertTrue(self.registry.graph("application", old_digest)[0] >= {old_digest, child})
+    self.assertEqual(self.registry.resolve("application", "custom"), old_digest)
+
+  def test_same_name_foreign_or_missing_association_protects_shared_content(self):
+    current, old_digest, _ = self.completed_history()
+    self.registry.aliases["application", "v0.9.0"] = old_digest
+    for association in ({"full_name": "other/repo"}, None, {}):
+      with self.subTest(association=association):
+        reference = package("application", "v0.9.0") | {"repository": association}
+        self.forgejo.package_records = [package("application", old_digest), reference]
+        self.assertFalse(any(item.get("kind") == "package" for item in plan(current)["candidates"]))
+
+  def test_ambiguous_digest_root_protects_separately_listed_children(self):
+    current, old_digest, _ = self.completed_history()
+    image = self.registry.images["application", old_digest]
+    child = next(item for item in image["graph"] if item != old_digest)
+    _, evidence_record = self.registry.graph("application", old_digest)
+    evidence_record = copy.deepcopy(evidence_record)
+    configuration = next(node["configuration"] for node in evidence_record["nodes"].values() if node["configuration"])
+    configuration["config"]["Labels"]["org.opencontainers.image.source"] = "https://foreign.invalid/source"
+    # Only the index is uncertain; the separately listed child still has owned labels.
+    self.registry.images["application", old_digest] = image | {"evidence": evidence_record}
+    self.forgejo.package_records = [package("application", child), package("application", old_digest)]
+    self.assertFalse(any(item.get("kind") == "package" for item in plan(current)["candidates"]))
+
+  def test_unavailable_preserved_evidence_blocks_all_deletions(self):
+    current, old_digest, evidence_path = self.completed_history()
+    self.forgejo.package_records = [package("application", old_digest), package("application", "custom")]
+    for mode in ("unresolved", "graph failure"):
+      with self.subTest(mode=mode):
+        if mode == "graph failure":
+          self.registry.aliases["application", "custom"] = old_digest
+        self.forgejo.deleted.clear()
+        failure = ReleaseError("Graph unavailable") if mode == "graph failure" else None
+        with patch.object(self.registry, "graph", wraps=self.registry.graph, side_effect=failure):
+          with self.assertRaises(ReleaseError):
+            apply(current, evidence_path)
+        self.assertEqual(self.forgejo.deleted, [])
+
+  def test_old_shaped_inventory_and_recreated_completed_alias_are_rechecked(self):
+    current, old_digest, evidence_path = self.completed_history()
+    self.registry.aliases["application", "v0.9.0"] = old_digest
+    self.forgejo.package_records = [package("application", old_digest), package("application", "v0.9.0")]
+    raw = {"kind": "package", "name": "application", "version": old_digest, "digest": old_digest}
+    alias = {"kind": "package", "name": "application", "version": "v0.9.0", "digest": old_digest, "complete": True}
+    for candidates in ([raw], [alias, raw]):
+      with self.subTest(candidates=candidates):
+        current.state.data["cleanup"] = {"schema": 1, "run": current.state.data["run"],
+          "candidates": copy.deepcopy(candidates), "skipped": []}
+        current.state.flush()
+        with self.assertRaisesRegex(ReleaseError, "required"):
+          apply(current, evidence_path)
+        self.assertEqual(self.forgejo.deleted, [])
+        self.assertFalse(current.state.data["cleanup"]["candidates"][-1].get("complete", False))
+
+  def test_alias_is_retired_before_its_digest_in_reverse_ordered_saved_inventory(self):
+    current, old_digest, evidence_path = self.completed_history()
+    self.registry.aliases["application", "v0.9.0"] = old_digest
+    self.forgejo.package_records = [package("application", old_digest), package("application", "v0.9.0")]
+    current.state.data["cleanup"] = plan(current)
+    self.assertEqual(current.state.data["cleanup"]["candidates"][1]["version"], old_digest)
+    apply(current, evidence_path)
+    packages = [item for item in self.forgejo.deleted if item[0] == "package"]
+    self.assertEqual(packages, [("package", "application", "v0.9.0"), ("package", "application", old_digest)])
+
+  def test_new_unscheduled_older_alias_between_digest_deletions_stops_retry(self):
+    current, old_digest, evidence_path = self.completed_history()
+    first = self.registry.add("application", "unlisted", "0.5.0")
+    self.registry.aliases.pop(("application", "unlisted"))
+    self.forgejo.package_records = [package("application", first), package("application", old_digest)]
+    current.state.data["cleanup"] = plan(current)
+    original = self.forgejo.delete_package
+    def introduce_alias(name, reference):
+      original(name, reference)
+      if reference == first:
+        self.registry.aliases["application", "v0.9.0"] = old_digest
+        self.forgejo.package_records.append(package("application", "v0.9.0"))
+    with patch.object(self.forgejo, "delete_package", side_effect=introduce_alias):
+      with self.assertRaisesRegex(ReleaseError, "required"):
+        apply(current, evidence_path)
+    self.assertIn(("package", "application", first), self.forgejo.deleted)
+    self.assertNotIn(("package", "application", old_digest), self.forgejo.deleted)
+    self.assertTrue(next(item for item in current.state.data["cleanup"]["candidates"] if item.get("version") == first)["complete"])
+
+  def test_changed_pending_alias_stops_before_any_deletion(self):
+    current, old_digest, evidence_path = self.completed_history()
+    self.registry.aliases["application", "v0.9.0"] = old_digest
+    self.forgejo.package_records = [package("application", "v0.9.0"), package("application", old_digest)]
+    current.state.data["cleanup"] = plan(current)
+    self.registry.add("application", "v0.9.0", "0.7.0")
+    with self.assertRaisesRegex(ReleaseError, "changed"):
+      apply(current, evidence_path)
+    self.assertEqual(self.forgejo.deleted, [])
+
+  def test_cleanup_checks_all_architectures_for_ownership_and_version(self):
+    current, old_digest, _ = self.completed_history()
+    image = self.registry.images["application", old_digest]
+    for labels in ({}, {"org.opencontainers.image.source": "foreign", "org.opencontainers.image.version": "0.1.0"},
+                   {"org.opencontainers.image.source": current.source, "org.opencontainers.image.version": "9.0.0"}):
+      with self.subTest(labels=labels):
+        self.registry.images["application", old_digest] = image
+        _, record = self.registry.graph("application", old_digest)
+        record = copy.deepcopy(record)
+        node = next(node for node in record["nodes"].values() if node["configuration"])
+        node["configuration"]["architecture"] = "riscv64"
+        node["configuration"]["config"]["Labels"] = labels
+        node["incoming"][0]["descriptor"]["platform"]["architecture"] = "riscv64"
+        self.registry.images["application", old_digest] = image | {"evidence": record}
+        self.forgejo.package_records = [package("application", old_digest)]
+        self.assertFalse(any(item.get("kind") == "package" for item in plan(current)["candidates"]))
+
+  def test_lost_alias_deletion_response_reconciles_before_digest_deletion(self):
+    current, old_digest, evidence_path = self.completed_history()
+    self.registry.aliases["application", "v0.9.0"] = old_digest
+    self.forgejo.package_records = [package("application", old_digest), package("application", "v0.9.0")]
+    original = self.forgejo.delete_package
+    def lost_response(name, reference):
+      original(name, reference)
+      raise SystemExit("Lost deletion response")
+    with patch.object(self.forgejo, "delete_package", side_effect=lost_response):
+      with self.assertRaises(SystemExit):
+        apply(current, evidence_path)
+    self.assertEqual([item for item in self.forgejo.deleted if item[0] == "package"],
+      [("package", "application", "v0.9.0")])
+    apply(self.workflow("2.0.0"), evidence_path)
+    self.assertEqual([item for item in self.forgejo.deleted if item[0] == "package"],
+      [("package", "application", "v0.9.0"), ("package", "application", old_digest)])
+
+  def test_malformed_or_unavailable_inventory_does_not_grant_deletion_authority(self):
+    current, old_digest, evidence_path = self.completed_history()
+    self.forgejo.package_records = [package("application", old_digest)]
+    current.state.data["cleanup"] = plan(current)
+    for response in (None, [None], [package("application", None)]):
+      with self.subTest(response=response), patch.object(self.forgejo, "packages", return_value=response):
+        with self.assertRaises(ReleaseError):
+          apply(current, evidence_path)
+        self.assertEqual(self.forgejo.deleted, [])
+    with patch.object(self.forgejo, "packages", side_effect=ReleaseError("Remote operation failed with HTTP 401")):
+      with self.assertRaisesRegex(ReleaseError, "401"):
+        apply(current, evidence_path)
+    self.assertEqual(self.forgejo.deleted, [])

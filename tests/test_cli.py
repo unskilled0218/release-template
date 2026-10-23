@@ -10,7 +10,7 @@ from unittest.mock import patch
 
 from release_template import cli
 from release_template.core import ReleaseError
-from tests.support import REVISION, FakeForgejo, FakeRegistry, FakeRunner, configuration
+from tests.support import REVISION, FakeForgejo, FakeRegistry, FakeRunner, configuration, evidence, package
 
 
 class CLITests(unittest.TestCase):
@@ -83,3 +83,33 @@ class CLITests(unittest.TestCase):
                             cwd=Path(__file__).resolve().parents[1])
     self.assertEqual(result.returncode, 1)
     self.assertIn("in-process test fixtures", result.stderr)
+
+  def test_new_template_pin_rejects_old_checkpoint_without_mutation(self):
+    self.assertEqual(self.invoke("publish", "--tag", "v1.0.0"), 1)
+    checkpoint = self.root / ".release-template/v1.0.0.json"
+    before = checkpoint.read_bytes()
+    releases = json.loads(json.dumps(self.forgejo.records))
+    for mode in ("resume", "cleanup-plan", "cleanup"):
+      with self.subTest(mode=mode):
+        self.runner.calls.clear()
+        with contextlib.redirect_stdout(self.output), contextlib.redirect_stderr(self.errors):
+          status = cli.main(self.root, "c" * 40, [mode, "--tag", "v1.0.0"])
+        self.assertEqual(status, 1)
+        self.assertIn("Checkpoint identity differs", self.errors.getvalue())
+        self.assertEqual(checkpoint.read_bytes(), before)
+        self.assertEqual(self.forgejo.records, releases)
+        self.assertEqual(self.forgejo.deleted, [])
+        self.assertFalse(any(call[:2] in (["docker", "login"], ["git", "push"]) or
+          call[:3] == ["docker", "buildx", "build"] or
+          call[:4] == ["docker", "buildx", "imagetools", "create"] for call in self.runner.calls))
+
+  def test_same_revision_cleanup_retry_revalidates_and_retires_staging(self):
+    self.assertEqual(self.invoke("publish", "--tag", "v1.0.0"), 1)
+    checkpoint = json.loads((self.root / ".release-template/v1.0.0.json").read_text())
+    staging = checkpoint["staging"]["application"]["tag"]
+    self.forgejo.package_records.append(package("application", staging))
+    evidence_path = evidence(self.root / "evidence.json")
+    self.assertEqual(self.invoke("cleanup", "--tag", "v1.0.0", "--deletion-evidence", str(evidence_path)), 0)
+    self.assertEqual(self.forgejo.deleted, [("package", "application", staging)])
+    self.assertEqual(self.invoke("cleanup", "--tag", "v1.0.0", "--deletion-evidence", str(evidence_path)), 0)
+    self.assertEqual(len(self.forgejo.deleted), 1)

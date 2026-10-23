@@ -17,6 +17,7 @@ from urllib.request import HTTPRedirectHandler, Request, build_opener, HTTPSHand
 
 from .config import endpoint
 from .core import ReleaseError, canonical, digest, load, require
+from .oci import immutable, runnable
 
 
 class Runner:
@@ -239,40 +240,51 @@ class Registry:
     return None if record is None else record[0]
 
   def graph(self, name, root):
-    manifests, configurations = {}, []
+    nodes, edges = {}, 0
 
-    def visit(reference, depth=0):
-      require(isinstance(reference, str) and re.fullmatch(r"sha256:[0-9a-f]{64}", reference),
-              "Manifest dependencies must be immutable SHA-256 digests")
-      require(depth < 32 and len(manifests) < 1000, "Manifest graph exceeds safety bound")
-      if reference in manifests:
+    def visit(descriptor, kind, parent=None, depth=0):
+      nonlocal edges
+      require(isinstance(descriptor, dict), "Invalid manifest descriptor")
+      reference = immutable(descriptor.get("digest"))
+      require(isinstance(descriptor.get("annotations", {}), dict), "Invalid descriptor annotations")
+      edges += 1
+      require(depth < 32 and edges <= 10000, "Manifest graph exceeds safety bound")
+      incoming = {"kind": kind, "parent": parent, "descriptor": descriptor}
+      if reference in nodes:
+        nodes[reference]["incoming"].append(incoming)
         return
+      require(len(nodes) < 1000, "Manifest graph exceeds safety bound")
       actual, manifest = self.request(name, "manifests", reference)
-      manifests[actual] = manifest
+      require(isinstance(manifest, dict), "Invalid manifest object")
+      node = {"digest": actual, "manifest": manifest, "configuration": None, "incoming": [incoming]}
+      nodes[actual] = node
       if "manifests" in manifest:
         require(isinstance(manifest["manifests"], list), "Invalid manifest index")
+        references = [immutable(item.get("digest")) if isinstance(item, dict) else immutable(None)
+                      for item in manifest["manifests"]]
+        require(len(references) == len(set(references)), "Duplicate manifest descriptor")
         for descriptor in manifest["manifests"]:
-          visit(descriptor["digest"], depth + 1)
+          visit(descriptor, "member", actual, depth + 1)
       elif "config" in manifest:
-        configuration_digest = manifest["config"]["digest"]
-        require(isinstance(configuration_digest, str) and re.fullmatch(r"sha256:[0-9a-f]{64}", configuration_digest),
-                "Image configurations must use immutable SHA-256 digests")
+        require(isinstance(manifest["config"], dict), "Invalid configuration descriptor")
+        configuration_digest = immutable(manifest["config"].get("digest"))
         _, configuration = self.request(name, "blobs", configuration_digest)
-        configurations.append(configuration)
+        require(isinstance(configuration, dict), "Invalid configuration object")
+        node["configuration"] = configuration
       else:
         require("artifactType" in manifest, "Unrecognized OCI manifest")
       if "subject" in manifest:
-        visit(manifest["subject"]["digest"], depth + 1)
+        visit(manifest["subject"], "subject", actual, depth + 1)
 
-    visit(root)
-    return set(manifests), configurations
+    visit({"digest": root}, "root")
+    return set(nodes), {"root": root, "nodes": nodes}
 
   def verify(self, name, root, platforms, commit, release_version, source):
-    graph, configurations = self.graph(name, root)
-    runnable = [item for item in configurations if item.get("architecture") in ("amd64", "arm64")]
-    actual = {item.get("os", "") + "/" + item["architecture"] for item in runnable}
-    require(actual == set(platforms) and len(runnable) == len(platforms), "Published platforms differ from required platforms")
-    for configuration in runnable:
+    graph, evidence = self.graph(name, root)
+    configurations = runnable(evidence)
+    actual = [item["os"] + "/" + item["architecture"] for item in configurations]
+    require(sorted(actual) == sorted(platforms), "Published platforms differ from required platforms")
+    for configuration in configurations:
       labels = configuration.get("config", {}).get("Labels", {})
       require(labels.get("org.opencontainers.image.revision") == commit and
               labels.get("org.opencontainers.image.version") == release_version and

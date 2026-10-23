@@ -5,12 +5,15 @@ import tempfile
 import threading
 import unittest
 import subprocess
+from types import SimpleNamespace
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from unittest.mock import patch
 
 from release_template.adapters import Forgejo, HTTP, Registry, Runner, git_identity, preflight
 from release_template.core import ReleaseError, canonical, digest
-from tests.support import COMMIT, FakeRegistry, FakeRunner, configuration
+from release_template.cleanup import plan, digest_owned
+from release_template.oci import OCI_MANIFEST, INDEX_TYPES, IMAGE_CONFIGS, EMPTY_CONFIG, ATTESTATION_LAYER, runnable
+from tests.support import COMMIT, FakeRegistry, FakeRunner, configuration, package
 
 
 class AdapterTests(unittest.TestCase):
@@ -81,6 +84,32 @@ class AdapterTests(unittest.TestCase):
     self.content[reference] = value
     return reference
 
+  def image(self, architecture="amd64", os_name="linux", labels=None):
+    labels = self.labels() if labels is None else labels
+    config = self.put({"architecture": architecture, "os": os_name, "config": {"Labels": labels}})
+    return self.put({"schemaVersion": 2, "mediaType": OCI_MANIFEST,
+      "config": {"mediaType": IMAGE_CONFIGS[0], "digest": config}, "layers": []})
+
+  def labels(self):
+    return {"org.opencontainers.image.revision": COMMIT, "org.opencontainers.image.version": "1.0.0",
+            "org.opencontainers.image.source": self.origin + "/fixtures/application"}
+
+  def index(self, descriptors):
+    return self.put({"schemaVersion": 2, "mediaType": INDEX_TYPES[0], "manifests": descriptors})
+
+  def verify(self, root, platforms=("linux/amd64", "linux/arm64")):
+    return Registry(self.config(), "fixture", "token").verify("application", root, platforms,
+      COMMIT, "1.0.0", self.labels()["org.opencontainers.image.source"])
+
+  def attestation(self, subject):
+    config = self.put({"architecture": "unknown", "os": "unknown"})
+    manifest = self.put({"schemaVersion": 2, "mediaType": OCI_MANIFEST,
+      "config": {"mediaType": IMAGE_CONFIGS[0], "digest": config},
+      "layers": [{"mediaType": ATTESTATION_LAYER, "digest": digest(b"attestation")}],
+      "subject": {"digest": subject}})
+    return {"digest": manifest, "platform": {"os": "unknown", "architecture": "unknown"},
+      "annotations": {"vnd.docker.reference.type": "attestation-manifest", "vnd.docker.reference.digest": subject}}
+
   def test_capped_page_size_does_not_stop_enumeration(self):
     api = Forgejo(self.config(), "fixture-token")
     self.assertEqual([item["id"] for item in api.releases()], [1, 2])
@@ -106,12 +135,11 @@ class AdapterTests(unittest.TestCase):
     self.challenge = True
     labels = {"org.opencontainers.image.revision": COMMIT, "org.opencontainers.image.version": "1.0.0",
               "org.opencontainers.image.source": self.origin + "/fixtures/application"}
-    manifests = []
-    for architecture in ("amd64", "arm64", "unknown"):
-      config = self.put({"architecture": architecture, "os": "linux", "config": {"Labels": labels}})
-      manifests.append(self.put({"schemaVersion": 2, "config": {"digest": config}, "layers": []}))
-    nested = self.put({"schemaVersion": 2, "manifests": [{"digest": reference} for reference in manifests]})
-    root = self.put({"schemaVersion": 2, "manifests": [{"digest": nested}]})
+    manifests = [self.image(architecture) for architecture in ("amd64", "arm64")]
+    attestation = self.attestation(manifests[0])
+    manifests.append(attestation["digest"])
+    nested = self.index([{"digest": reference} for reference in manifests[:2]] + [attestation])
+    root = self.index([{"digest": nested}])
     self.content["latest"] = self.content[root]
     registry = Registry(self.config(), "fixture", "token")
     self.assertEqual(registry.resolve("application", "latest"), root)
@@ -133,6 +161,117 @@ class AdapterTests(unittest.TestCase):
     root = self.put({"schemaVersion": 2, "manifests": [{"digest": "latest"}]})
     with self.assertRaisesRegex(ReleaseError, "immutable"):
       Registry(self.config(), "fixture", "token").graph("application", root)
+
+  def test_extra_runnable_architecture_is_not_an_attestation(self):
+    labels = {"org.opencontainers.image.revision": COMMIT, "org.opencontainers.image.version": "1.0.0",
+              "org.opencontainers.image.source": self.origin + "/fixtures/application"}
+    manifests = []
+    for architecture in ("amd64", "arm64", "riscv64"):
+      config = self.put({"architecture": architecture, "os": "linux", "config": {"Labels": labels}})
+      manifests.append(self.put({"schemaVersion": 2, "mediaType": "application/vnd.oci.image.manifest.v1+json",
+        "config": {"mediaType": "application/vnd.oci.image.config.v1+json", "digest": config}, "layers": []}))
+    root = self.put({"schemaVersion": 2, "mediaType": "application/vnd.oci.image.index.v1+json",
+      "manifests": [{"digest": reference} for reference in manifests]})
+    with self.assertRaises(ReleaseError):
+      Registry(self.config(), "fixture", "token").verify("application", root, ["linux/amd64", "linux/arm64"],
+        COMMIT, "1.0.0", labels["org.opencontainers.image.source"])
+
+  def test_extra_unlabeled_image_and_malformed_platforms_fail_closed(self):
+    required = [{"digest": self.image(architecture)} for architecture in ("amd64", "arm64")]
+    for architecture, os_name, labels in (("riscv64", "linux", {}), ("unknown", "linux", {}),
+                                           (None, "linux", {}), ("amd64", None, {})):
+      with self.subTest(architecture=architecture, os_name=os_name):
+        root = self.index(required + [{"digest": self.image(architecture, os_name, labels)}])
+        with self.assertRaises(ReleaseError):
+          self.verify(root)
+
+  def test_missing_or_conflicting_runnable_labels_fail(self):
+    for labels in ({}, self.labels() | {"org.opencontainers.image.revision": "wrong"},
+                   self.labels() | {"org.opencontainers.image.version": "wrong"},
+                   self.labels() | {"org.opencontainers.image.source": "wrong"}):
+      with self.subTest(labels=labels), self.assertRaisesRegex(ReleaseError, "labels"):
+        self.verify(self.image(labels=labels), ["linux/amd64"])
+
+  def test_duplicate_platforms_and_conflicting_shared_descriptors_fail(self):
+    first = self.image()
+    second = self.image(labels=self.labels() | {"unrelated": "different content"})
+    for descriptors in ([{"digest": first}, {"digest": first}],
+                        [{"digest": first}, {"digest": second}],
+                        [{"digest": first, "platform": {"os": "linux", "architecture": "arm64"}}],
+                        [{"digest": first, "mediaType": INDEX_TYPES[0]}]):
+      with self.subTest(descriptors=descriptors), self.assertRaises(ReleaseError):
+        self.verify(self.index(descriptors), ["linux/amd64"])
+    left = self.index([{"digest": first, "platform": {"os": "linux", "architecture": "amd64"}}])
+    right = self.index([{"digest": first, "platform": {"os": "linux", "architecture": "arm64"}}])
+    with self.assertRaises(ReleaseError):
+      self.verify(self.index([{"digest": left}, {"digest": right}]), ["linux/amd64"])
+
+  def test_explicit_oci_artifact_preserves_subject_without_counting_its_platform(self):
+    subject = self.image("riscv64")
+    artifact = self.put({"schemaVersion": 2, "mediaType": OCI_MANIFEST,
+      "artifactType": "application/vnd.example.verification+json",
+      "config": {"mediaType": EMPTY_CONFIG, "digest": self.put({})},
+      "layers": [{"mediaType": "application/vnd.example.verification+json", "digest": digest(b"report")}],
+      "subject": {"digest": subject}})
+    required = [self.image(architecture) for architecture in ("amd64", "arm64")]
+    root = self.index([{"digest": item} for item in required + [artifact]])
+    graph = self.verify(root)
+    self.assertTrue({root, artifact, subject, *required} <= graph)
+    _, evidence = Registry(self.config(), "fixture", "token").graph("application", root)
+    self.assertEqual(len(runnable(evidence)), 2)
+    self.assertEqual(len(runnable(evidence, include_subjects=True)), 3)
+
+  def test_artifact_marker_cannot_hide_a_runnable_image(self):
+    image = self.image("riscv64")
+    for descriptor in ({"digest": image, "annotations": {"vnd.docker.reference.type": "attestation-manifest"}},
+                       {"digest": image, "platform": {"os": "unknown", "architecture": "unknown"},
+                        "annotations": {"vnd.docker.reference.type": "attestation-manifest",
+                                        "vnd.docker.reference.digest": self.image()}}):
+      with self.subTest(descriptor=descriptor), self.assertRaises(ReleaseError):
+        self.verify(self.index([{"digest": self.image()}, descriptor]), ["linux/amd64"])
+    contradictory = self.content[image] | {"artifactType": "application/vnd.example.artifact"}
+    with self.assertRaises(ReleaseError):
+      self.verify(self.put(contradictory), ["linux/riscv64"])
+
+  def test_incomplete_attestation_evidence_and_mixed_roles_fail(self):
+    subject = self.image()
+    valid = self.attestation(subject)
+    malformed = [valid | {"annotations": {}}, valid | {"platform": {"os": "linux", "architecture": "amd64"}},
+                 valid | {"annotations": valid["annotations"] | {"vnd.docker.reference.digest": digest(b"missing")}}]
+    for descriptor in malformed:
+      with self.subTest(descriptor=descriptor), self.assertRaises(ReleaseError):
+        self.verify(self.index([{"digest": subject}, descriptor]), ["linux/amd64"])
+    left = self.index([valid])
+    right = self.index([{"digest": valid["digest"]}])
+    with self.assertRaises(ReleaseError):
+      self.verify(self.index([{"digest": subject}, {"digest": left}, {"digest": right}]), ["linux/amd64"])
+
+  def test_real_nested_graph_protects_preserved_alias_and_attestation_dependencies(self):
+    child = self.image()
+    attestation = self.attestation(child)
+    nested = self.index([{"digest": child}, attestation])
+    old = self.index([{"digest": nested}])
+    current = self.image(labels=self.labels() | {"org.opencontainers.image.version": "2.0.0"})
+    self.content["custom"] = self.content[old]
+    registry = Registry(self.config(), "fixture", "token")
+    records = [package("application", reference) for reference in (child, nested, old, attestation["digest"], "custom")]
+    with tempfile.TemporaryDirectory() as temporary:
+      workflow = SimpleNamespace(config=self.config(), release_version="2.0.0", tag="v2.0.0", registry=registry,
+        state=SimpleNamespace(path=Path(temporary) / "v2.0.0.json",
+          data={"run": "fixture", "outputs": {"application": {"digest": current}}, "staging": {}}),
+        forgejo=SimpleNamespace(packages=lambda: records, releases=lambda: []))
+      # The publication precondition is checked through the real registry, not a no-op.
+      workflow.verify_publication = lambda: registry.verify("application", current, ["linux/amd64"], COMMIT,
+        "2.0.0", self.labels()["org.opencontainers.image.source"])
+      self.assertFalse(plan(workflow)["candidates"])
+      _, old_evidence = registry.graph("application", old)
+      self.assertTrue(digest_owned(workflow, old_evidence))
+
+  def test_docker_schema_two_image_is_supported(self):
+    reference = self.image()
+    manifest = self.content[reference] | {"mediaType": "application/vnd.docker.distribution.manifest.v2+json"}
+    manifest["config"] = manifest["config"] | {"mediaType": IMAGE_CONFIGS[1]}
+    self.verify(self.put(manifest), ["linux/amd64"])
 
   def test_preflight_diagnostics_name_builder_and_missing_platforms(self):
     runner = FakeRunner(FakeRegistry())

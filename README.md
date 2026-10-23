@@ -4,7 +4,7 @@
   - [Use](#use)
   - [Development](#development)
 
-Version 0.1.0 provides pinned, reusable Forgejo container release tooling. It builds once, promotes verified digests, publishes text-only releases, and cleans older versions only after verified publication. Final registry tags default to `latest` only; versioned Git tags remain.
+Version 0.1.1 provides pinned, reusable Forgejo container release tooling. It builds once, promotes verified digests, publishes text-only releases, and cleans older versions only after verified publication. Final registry tags default to `latest` only; versioned Git tags remain. Cleanup protects surviving references and their graphs; publication verifies every runnable platform.
 
 ## Use
 

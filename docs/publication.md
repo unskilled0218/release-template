@@ -37,6 +37,8 @@ Resume accepts aliases only at the captured predecessor or this exact run's prep
 
 After source advances, use the same committed source checkout and pinned template/configuration to inspect its checkpoint. The source confirmation policy still requires the configured remote main to match; do not roll main backward to force recovery. Investigate mismatches rather than rewriting history.
 
+`resume`, `cleanup-plan`, and `cleanup` require the exact checkpoint template revision, not merely the same schema. Updating managed code cannot resume an old-pin publication or cleanup transaction. Preserve the checkpoint and its original provenance; cross-revision adoption requires a separately reviewed procedure and has no automatic bypass. Do not rewrite identity or release metadata, discard state, or use vulnerable old-code cleanup to force progress. Within a matching revision, saved cleanup inventories are revalidated against current identities and all surviving reference graphs before deletion.
+
 ## Safety boundaries
 
 The source reference is `home-web/scripts/release.sh` plus `home-web/docs/releases.md`. Preserved conventions include clean main, exact versions, source checks, early platform preflight, isolated credentials, trusted TLS, versioned Git tags, and single-publisher operation. Archive uploads, separate archive/registry builds, and archive-dependent `--promote-latest` are intentionally replaced.

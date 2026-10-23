@@ -4,6 +4,7 @@ import time
 
 from .core import ReleaseError, load, older, require
 from .policy import owned_package, release_candidates
+from .oci import runnable
 
 
 def deletion_evidence(path, config):
@@ -61,46 +62,119 @@ def protected_graph(workflow):
   return protected
 
 
+def digest_owned(workflow, evidence):
+  try:
+    configurations = runnable(evidence, include_subjects=True)
+  except ReleaseError:
+    return False
+  source = workflow.config["forgejo"].rstrip("/") + "/" + workflow.config["repository"]
+  labels = [item.get("config", {}).get("Labels", {}) for item in configurations]
+  return bool(labels) and all(isinstance(item, dict) and
+    item.get("org.opencontainers.image.source") == source and
+    older(item.get("org.opencontainers.image.version"), workflow.release_version) for item in labels)
+
+
+def package_eligibility(workflow, package, resolved, evidence):
+  """Eligibility is policy, not authority to expand a persisted transaction."""
+  config, state = workflow.config, workflow.state.data
+  name, reference = package["name"], package["version"]
+  if not owned_package(package, config["repository"], set(state["outputs"])):
+    return False, None
+  image = next(image for image in config["images"] if image["name"] == name)
+  if reference == "latest" or (image.get("retain_version") and reference == workflow.tag):
+    return False, None
+  staging = state["staging"].get(name)
+  if staging and reference == staging["tag"]:
+    require(resolved == staging["digest"], "Staging ownership/digest conflict")
+    return True, None
+  if reference.startswith("sha256:"):
+    owned = digest_owned(workflow, evidence)
+    return owned, None if owned else "Digest ownership/version cannot be proven"
+  if older(reference, workflow.release_version):
+    return True, None
+  return False, "Unrecognized version or unfinished external staging reference"
+
+
+def package_inventory(workflow):
+  """Resolve all same-name references, including records outside deletion authority."""
+  rows, graphs = {}, {}
+  packages = workflow.forgejo.packages()
+  require(isinstance(packages, list), "Expected package inventory array")
+  for package in packages:
+    require(isinstance(package, dict), "Invalid package inventory record")
+    if package.get("type") != "container" or package.get("name") not in workflow.state.data["outputs"]:
+      continue
+    name, reference = package["name"], package.get("version")
+    require(isinstance(reference, str) and reference, "Invalid package reference")
+    key = (name, reference)
+    require(key not in rows, "Duplicate package inventory reference")
+    resolved = workflow.registry.resolve(name, reference)
+    require(resolved is not None, "Preserved package reference has no registry identity")
+    if (name, resolved) not in graphs:
+      graphs[name, resolved] = workflow.registry.graph(name, resolved)
+    graph, evidence = graphs[name, resolved]
+    eligible, reason = package_eligibility(workflow, package, resolved, evidence)
+    rows[key] = {"package": package, "digest": resolved, "graph": graph,
+                 "eligible": eligible, "reason": reason}
+  return rows
+
+
+def survivor_graph(workflow, rows, candidates):
+  protected = protected_graph(workflow)
+  pending = {(item["name"], item["version"]): item for item in candidates
+             if item["kind"] == "package" and not item.get("complete")}
+  for key, row in rows.items():
+    candidate = pending.get(key)
+    authorized = candidate and candidate.get("digest") == row["digest"] and row["eligible"]
+    if not authorized:
+      protected[key[0]].update(row["graph"])
+  return protected
+
+
+def skipped_records(rows, protected):
+  return [{"name": name, "version": reference, "reason": row["reason"]}
+          for (name, reference), row in rows.items() if row["reason"] and
+          (not reference.startswith("sha256:") or row["digest"] not in protected[name])]
+
+
 def plan(workflow):
   workflow.verify_publication()
-  config, state = workflow.config, workflow.state.data
-  protected = protected_graph(workflow)
-  current = workflow.release_version
-  candidates = release_candidates(workflow.forgejo.releases(), current)
-  skipped = []
-  names = set(state["outputs"])
-  for package in workflow.forgejo.packages():
-    if not owned_package(package, config["repository"], names):
+  rows = package_inventory(workflow)
+  candidates = release_candidates(workflow.forgejo.releases(), workflow.release_version)
+  candidates.extend({"kind": "package", "name": name, "version": reference, "digest": row["digest"]}
+                    for (name, reference), row in rows.items() if row["eligible"])
+  protected = survivor_graph(workflow, rows, candidates)
+  candidates = [item for item in candidates if item["kind"] != "package" or
+                not item["version"].startswith("sha256:") or item["digest"] not in protected[item["name"]]]
+  # Unknown digest roots remain visible even though they protect their own graph.
+  skipped = skipped_records(rows, protected_graph(workflow))
+  return {"schema": 1, "run": workflow.state.data["run"], "candidates": candidates, "skipped": skipped}
+
+
+def validate_inventory(workflow, inventory):
+  require(inventory.get("schema") == 1 and inventory["run"] == workflow.state.data["run"],
+          "Cleanup belongs to another run or schema")
+  rows = package_inventory(workflow)
+  protected = survivor_graph(workflow, rows, inventory["candidates"])
+  keys = set()
+  for candidate in inventory["candidates"]:
+    require(candidate.get("kind") in ("release", "package"), "Invalid cleanup candidate kind")
+    if candidate["kind"] != "package":
       continue
-    name, reference = package["name"], package["version"]
-    retained = {"latest"}
-    image = next(image for image in config["images"] if image["name"] == name)
-    if image.get("retain_version"):
-      retained.add(workflow.tag)
-    if reference in retained:
+    key = (candidate["name"], candidate["version"])
+    require(key not in keys, "Duplicate cleanup candidate")
+    keys.add(key)
+    if candidate.get("complete"):
       continue
-    staging = state["staging"].get(name)
-    own_staging = bool(staging and reference == staging["tag"])
-    if not own_staging and not older(reference, current) and not reference.startswith("sha256:"):
-      skipped.append({"name": name, "version": reference, "reason": "Unrecognized version or unfinished external staging reference"})
+    row = rows.get(key)
+    if row is None:
+      require(workflow.forgejo.get(workflow.forgejo.package_path(*key), absent=True) is None,
+              "Cleanup candidate missing from complete package inventory")
       continue
-    resolved = workflow.registry.resolve(name, reference)
-    require(resolved is not None, "Package exists without registry identity")
-    if own_staging:
-      require(resolved == staging["digest"], "Staging ownership/digest conflict")
-    if reference.startswith("sha256:"):
-      if resolved in protected[name]:
-        continue
-      _, configurations = workflow.registry.graph(name, resolved)
-      runnable = [item for item in configurations if item.get("architecture") in ("amd64", "arm64")]
-      labels = [item.get("config", {}).get("Labels", {}) for item in runnable]
-      source = config["forgejo"].rstrip("/") + "/" + config["repository"]
-      if not labels or not all(item.get("org.opencontainers.image.source") == source and
-          older(item.get("org.opencontainers.image.version"), current) for item in labels):
-        skipped.append({"name": name, "version": reference, "reason": "Digest ownership/version cannot be proven"})
-        continue
-    candidates.append({"kind": "package", "name": name, "version": reference, "digest": resolved})
-  return {"schema": 1, "run": state["run"], "candidates": candidates, "skipped": skipped}
+    require(row["digest"] == candidate["digest"] and row["eligible"], "Cleanup package identity/eligibility changed")
+    require(not key[1].startswith("sha256:") or candidate["digest"] not in protected[key[0]],
+            "Digest is now required by a retained, surviving, or resumable image")
+  return rows
 
 
 def apply(workflow, evidence_path):
@@ -110,11 +184,16 @@ def apply(workflow, evidence_path):
     workflow.state.data["cleanup"] = plan(workflow)
     workflow.state.flush()
   inventory = workflow.state.data["cleanup"]
-  require(inventory["run"] == workflow.state.data["run"], "Cleanup belongs to another run")
-  for candidate in inventory["candidates"]:
+  validate_inventory(workflow, inventory)
+  # Retire aliases before their backing digest, regardless of saved inventory order.
+  ordered = sorted(inventory["candidates"], key=lambda item:
+    2 if item["kind"] == "package" and item["version"].startswith("sha256:") else
+    0 if item["kind"] == "package" else 1)
+  for candidate in ordered:
     if candidate.get("complete"):
       continue
     workflow.verify_publication()
+    validate_inventory(workflow, inventory)
     if candidate["kind"] == "release":
       existing = workflow.forgejo.release(candidate["tag"])
       if existing is not None:
@@ -129,14 +208,13 @@ def apply(workflow, evidence_path):
         require(owned_package(present, workflow.config["repository"], set(workflow.state.data["outputs"])),
                 "Package ownership changed")
         require(workflow.registry.resolve(name, reference) == candidate["digest"], "Cleanup package digest changed")
-        protected = protected_graph(workflow)
-        require(not reference.startswith("sha256:") or candidate["digest"] not in protected[name],
-                "Digest is now required by a retained or resumable image")
         require(evidence["alias_preserves_shared_manifest"], "Shared alias deletion is not verified")
         workflow.forgejo.delete_package(name, reference)
     candidate["complete"] = True
     workflow.state.flush()
   workflow.verify_publication()
+  rows = validate_inventory(workflow, inventory)
+  inventory["skipped"] = skipped_records(rows, protected_graph(workflow))
   workflow.state.data["cleanup_complete"] = not bool(inventory["skipped"])
   workflow.state.flush()
   require(workflow.state.data["cleanup_complete"], "Cleanup incomplete: ambiguous records were preserved; inspect cleanup-plan")

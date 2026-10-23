@@ -27,6 +27,8 @@ Use the same explicit update command with a newly reviewed immutable revision. D
 
 Releases execute vendored pinned files without network updates. The stable launcher lives outside the changing engine and validates the installed inventory before importing it. Bootstrap protocol 1 does not automatically update bootstrap code: a source revision with changed stable launcher bytes is refused until a separately reviewed bootstrap migration exists. This avoids replacing the guard that protects a multi-file update while a release is starting.
 
+Managed-code upgrades do not migrate release checkpoints. Checkpoint identity includes the exact template commit as well as source/configuration identity; the new pin rejects an old-pin checkpoint even when both use schema 1. Same-revision retries remain supported. Preserve old checkpoints and publication provenance for a separately reviewed operator procedure. Do not rewrite identity fields, discard checkpoints, roll source backward, or run vulnerable old-code cleanup as an upgrade workaround. Version 0.1.1 supplies no cross-revision adoption command.
+
 ## Interrupted transactions
 
 The updater and launcher share `.template-operation.lock` using nonblocking POSIX `flock` for their whole operation. A second update or release fails promptly. Supported destinations are Linux/POSIX local filesystems with atomic same-filesystem replacement, file/directory `fsync`, and working advisory locks. Network filesystems and external writers that ignore this protocol are not supported.
