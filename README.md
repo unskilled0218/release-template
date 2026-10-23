@@ -4,7 +4,7 @@
   - [Use](#use)
   - [Development](#development)
 
-Version 0.2.0 provides pinned, reusable Gitea container release tooling. It builds once, promotes verified digests, publishes text-only releases, and cleans older versions only after verified publication. Final registry tags default to `latest` only; versioned Git tags remain. Cleanup protects surviving graphs and retires referring manifests before dependencies; publication verifies every runnable platform.
+Version 0.2.1 provides pinned, reusable Gitea container release tooling. It builds once, promotes verified digests, publishes text-only releases, and cleans older versions only after verified publication. Final registry tags default to `latest` only; versioned Git tags remain. Cleanup protects surviving graphs and retires referring manifests before dependencies; publication verifies every runnable platform. Only an explicitly allowed HTTP 404 establishes lookup absence; malformed successful responses stop progress.
 
 ## Use
 

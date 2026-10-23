@@ -5,9 +5,10 @@ import tempfile
 from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
+from urllib.parse import unquote
 
 from release_template import cleanup
-from release_template.adapters import Registry
+from release_template.adapters import Gitea, Registry
 from release_template.cleanup import apply, plan
 from release_template.core import ReleaseError, digest, load
 from release_template.state import State
@@ -489,3 +490,51 @@ class RetirementIntegrationTests(unittest.TestCase):
     self.assertIn(child, self.server.content)
     self.resume()
     self.assertEqual(self.gitea.deleted, [("application", parent), ("application", child)])
+
+  def test_null_delete_confirmation_keeps_parent_pending_and_404_retry_does_not_repeat_delete(self):
+    child = self.server.image()
+    parent = self.server.index([{"digest": child}])
+    self.inventory([child, parent])
+    api = Gitea(self.config, "fixture-token")
+    original = self.gitea.get
+    uncertain = True
+    requests = []
+
+    def request(method, path, headers=None, body=None, allowed=(200,)):
+      self.assertEqual(method, "GET")
+      requests.append(path)
+      reference = unquote(path.rsplit("/", 1)[1])
+      record = original(self.gitea.package_path("application", reference), absent=True)
+      if reference == parent and ("application", parent) in self.gitea.deleted and uncertain:
+        status, record = 200, None
+      else:
+        status = 404 if record is None else 200
+      self.assertIn(status, allowed)
+      return status, {}, json.dumps(record).encode()
+
+    def lookup(path, absent=False):
+      if path == "/api/v1/version":
+        return original(path, absent)
+      name, reference = path.split(":", 1)
+      return api.get(api.package_path(name, reference), absent=absent)
+
+    with patch.object(api.http, "request", side_effect=request), patch.object(self.gitea, "get", side_effect=lookup):
+      with self.assertRaises(ReleaseError):
+        apply(self.workflow, self.evidence)
+      saved = load(self.path)
+      approval = copy.deepcopy(saved["cleanup"]["retirement"])
+      self.assertTrue(saved["published"])
+      self.assertFalse(saved["cleanup_complete"])
+      self.assertTrue(all(not item.get("complete", False) for item in saved["cleanup"]["candidates"]))
+      self.assertEqual(self.gitea.deleted, [("application", parent)])
+      self.assertNotIn(parent, self.server.content)
+      self.assertIn(child, self.server.content)
+      self.assertIn(api.package_path("application", parent), requests)
+      uncertain = False
+      with patch.object(self.registry, "graph", wraps=self.registry.graph) as graphs:
+        self.resume()
+      self.assertFalse(any(call.args == ("application", parent) for call in graphs.call_args_list))
+    self.assertEqual(self.gitea.deleted, [("application", parent), ("application", child)])
+    self.assertEqual(load(self.path)["cleanup"]["retirement"], approval)
+    self.assertTrue(load(self.path)["cleanup_complete"])
+    self.workflow.verify_publication()

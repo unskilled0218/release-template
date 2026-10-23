@@ -185,6 +185,35 @@ class GiteaHTTPContractTests(unittest.TestCase):
     with self.assertRaisesRegex(ReleaseError, "array"):
       self.api.releases()
 
+  def test_successful_null_is_never_release_or_package_absence(self):
+    for path in (self.base + "/releases/tags/v1.0.0", self.api.package_path("application", "v0.9.0")):
+      self.routes["GET", path] = (200, None)
+      for absent in (False, True):
+        with self.subTest(path=path, absent=absent), self.assertRaises(ReleaseError):
+          self.api.get(path, absent=absent)
+    with self.assertRaises(ReleaseError):
+      self.api.release("v1.0.0")
+
+  def test_optional_object_lookups_reject_other_shapes_without_logging_values(self):
+    for path in (self.base + "/releases/tags/v1.0.0", self.api.package_path("application", "v0.9.0")):
+      for response in ([], ["private-fixture-token"], "private-fixture-token", 0, 1, False, True):
+        self.routes["GET", path] = (200, response)
+        with self.subTest(path=path, response=response):
+          with self.assertRaises(ReleaseError) as caught:
+            self.api.get(path, absent=True)
+          self.assertNotIn("private-fixture-token", str(caught.exception))
+
+  def test_only_allowed_404_returns_absence_and_empty_pages_remain_arrays(self):
+    for path in (self.base + "/releases/tags/v1.0.0", self.api.package_path("application", "v0.9.0")):
+      self.routes["GET", path] = (404, {})
+      self.assertIsNone(self.api.get(path, absent=True))
+      with self.assertRaisesRegex(ReleaseError, "404"):
+        self.api.get(path)
+      self.routes["GET", path] = (200, {})
+      self.assertEqual(self.api.get(path, absent=True), {})
+    self.routes["GET", self.base + "/releases?page=1&limit=100"] = (200, [])
+    self.assertEqual(self.api.releases(), [])
+
   def test_version_response_shape_can_be_consumed_by_the_exact_version_gate(self):
     version = "29.0.0+dev-160-g55186ca39b"
     self.routes["GET", "/api/v1/version"] = (200, {"version": version})

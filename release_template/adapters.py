@@ -148,8 +148,14 @@ class Gitea:
     self.headers = {"Authorization": "token " + token, "Content-Type": "application/json"}
 
   def get(self, path, absent=False):
+    """Only an allowed 404 is absent; optional lookups otherwise require objects."""
     status, _, data = self.http.request("GET", path, self.headers, allowed=(200, 404) if absent else (200,))
-    return None if status == 404 else json_response(data)
+    if status == 404:
+      return None
+    value = json_response(data)
+    require(value is not None, "Expected non-null Gitea JSON response")
+    require(not absent or isinstance(value, dict), "Expected Gitea lookup object")
+    return value
 
   def pages(self, path, query=None):
     result, fingerprints = [], set()
