@@ -108,5 +108,16 @@
       "suggestion": 0
     },
     "scope": "Branch 5-fix-gitea-null-response through 93f6b26 vs 4-migrate-forgejo-to-gitea at e3453c8; 10 changed files; B1 resolved with 141 passing tests and status-aware durable recovery coverage"
+  },
+  {
+    "date": "2026-10-23",
+    "mode": "Health Dashboard",
+    "score": 97,
+    "findings": {
+      "critical": 0,
+      "warning": 2,
+      "suggestion": 0
+    },
+    "scope": "Whole container-release-template project at d03d3b9 on main; no tracked diff, PR skipped; 141 passing tests; abandonment confirmation and evidence-date validity gaps reproduced; untracked todo.md excluded"
   }
 ]
