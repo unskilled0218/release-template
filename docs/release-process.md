@@ -51,7 +51,7 @@ Run `./scripts/release.sh` only when ready to publish. There is no separate netw
 - Gitea: complete authenticated tag/release inventories classify the requested version before staging lookup or publication writes. Failed, malformed, oversized, or incomplete evidence stops the command.
 - Registry: predecessor and staging manifest reads verify registry access and matching evidence. Login precedes a fresh build or staging reuse; read access and login do not prove that a later push will be authorized.
 
-Ping, open ports, and one successful HTTP response are not substitutes for these service-specific checks. Reads cannot guarantee every future write permission or continued service availability. Repository/package access, stable Gitea 1.25.x authority for a new package link, and exact association evidence are checked after publication under the existing [package association rules](bash-publication.md#package-association); they are not early-readiness guarantees.
+Ping, open ports, and one successful HTTP response are not substitutes for these service-specific checks. Reads cannot guarantee every future write permission or continued service availability. Repository/package access, stable Gitea 1.25.x or exact stable 28.2.0 authority for a new package link, and exact association evidence are checked after publication under the existing [package association rules](bash-publication.md#package-association); they are not early-readiness guarantees.
 
 ## Build and publish
 

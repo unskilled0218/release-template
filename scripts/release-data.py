@@ -382,12 +382,12 @@ def package_association(work, config, ensure=False):
   if package_linked(work, config, package_url, target_id):
     return
   require(ensure, "Package is not linked to the configured repository")
-  # Gitea can hide inaccessible links as null. Require a server family whose link
-  # service rejects already-linked packages instead of replacing their association.
+  # Gitea can hide inaccessible links as null. Only reviewed stable contracts
+  # (1.25.x and exact 28.2.0) may rely on the server's existing-link refusal.
   server = api_document(work, config["gitea"] + "/api/v1/version")
   require(isinstance(server, dict) and isinstance(server.get("version"), str) and
-          re.fullmatch(r"1\.25\.(0|[1-9][0-9]*)", server["version"]),
-          "Package link writes require supported stable Gitea 1.25.x; server association safety is unverified")
+          re.fullmatch(r"(?:1\.25\.(0|[1-9][0-9]*)|28\.2\.0)", server["version"]),
+          "Package link writes require supported stable Gitea 1.25.x or exact 28.2.0; server association safety is unverified")
   # Refresh both identities immediately before mutation; never treat failed reads as permission.
   require(repository_identity(api_document(work, target_url), config["repository"]) == target_id,
           "Package target repository changed")
