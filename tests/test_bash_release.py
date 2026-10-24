@@ -88,7 +88,7 @@ class BashPublicationTests(unittest.TestCase):
     self.token.write_text("SENTINEL_PRIVATE_TOKEN\n")
     self.token.chmod(0o600)
     config = json.loads((self.root / "scripts/release.json").read_text())
-    config |= {"repository": "fixtures/application", "image": "git.lan/fixtures/application",
+    config |= {"repository": "fixtures/application", "image": "git.lan/fixtures/application-hello",
                "notes": "notes.md", "token_file": str(self.token)}
     (self.root / "scripts/release.json").write_text(json.dumps(config))
     self.state_path = self.base / "state.json"
@@ -137,7 +137,7 @@ class BashPublicationTests(unittest.TestCase):
     return result
 
   def assert_no_writes(self):
-    self.assertFalse(set(self.events()) & {"build", "tag-push", "promote", "release-post"}, self.events())
+    self.assertFalse(set(self.events()) & {"build", "tag-push", "promote", "release-post", "package-link"}, self.events())
 
   def predecessor(self):
     data = helper_module()
@@ -209,7 +209,7 @@ class BashPublicationTests(unittest.TestCase):
     self.assertIn(injection, events, "The precise post-guard read must receive the fault")
     self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
     self.assertNotIn("Publication verified", result.stdout)
-    self.assertFalse(set(events[events.index(injection) + 1:]) & {"build", "tag-push", "promote", "release-post"})
+    self.assertFalse(set(events[events.index(injection) + 1:]) & {"build", "tag-push", "promote", "release-post", "package-link"})
     self.assertEqual(events.count("build"), 1)
     self.assertEqual(events.count("tag-push"), 1)
     self.assertEqual(self.state()["aliases"]["latest"], predecessor)
@@ -225,7 +225,7 @@ class BashPublicationTests(unittest.TestCase):
     self.assertLess(events.index("tag-confirmed"), events.index(injection))
     self.assertNotEqual(result.returncode, 0)
     self.assertNotIn("Publication verified", result.stdout)
-    self.assertFalse(set(events[events.index(injection) + 1:]) & {"build", "tag-push", "promote", "release-post"})
+    self.assertFalse(set(events[events.index(injection) + 1:]) & {"build", "tag-push", "promote", "release-post", "package-link"})
     self.assertEqual(events.count("tag-push"), 1)
     self.assertEqual(events.count("promote"), int(stage == "before_release"))
     self.assertEqual(events.count("release-post"), 0)
@@ -697,6 +697,172 @@ class BashPublicationTests(unittest.TestCase):
         data.blob(self.root, captured, path)
 
 
+  def target_repository(self):
+    return {"id": 17, "name": "application", "full_name": "fixtures/application", "owner": {"login": "fixtures"}}
+
+  def reset_association(self):
+    self.change(linked_repository=None, target_reads=0, package_reads=0, version_reads=0, association_fault={}, link_fault=None)
+    (self.base / "events").write_text("")
+
+  def assert_no_publication_writes(self):
+    self.assertFalse(set(self.events()) & {"build", "tag-push", "promote", "release-post"}, self.events())
+    self.assertFalse(any(event.startswith("registry:rt-") for event in self.events()))
+
+  def test_fresh_release_links_only_configured_package_and_verifies_it(self):
+    unrelated = {"foreign-package": {"repository": {"id": 999}}}
+    self.change(unrelated_packages=unrelated)
+    result = self.release()
+    self.assertEqual(result.returncode, 0, result.stderr)
+    self.assertEqual(self.state()["linked_repository"], self.target_repository())
+    self.assertEqual(self.state()["unrelated_packages"], unrelated)
+    events = self.events()
+    self.assertEqual(events.count("package-link"), 1)
+    self.assertLess(events.index("release-post"), events.index("package-link"))
+    self.assertIn("http:GET:/api/v1/packages/fixtures/container/application-hello/latest", events[events.index("package-link") + 1:])
+    self.assertFalse(any("unlink" in event or "DELETE" in event for event in events))
+
+  def test_fresh_release_preserves_correct_link_without_post(self):
+    self.change(linked_repository=self.target_repository())
+    result = self.release()
+    self.assertEqual(result.returncode, 0, result.stderr)
+    self.assertNotIn("package-link", self.events())
+
+  def test_fresh_release_refuses_conflicting_link_without_rollback(self):
+    foreign = self.target_repository() | {"id": 99}
+    self.change(linked_repository=foreign)
+    result = self.release()
+    self.assertNotEqual(result.returncode, 0)
+    self.assertNotIn("Publication verified", result.stdout)
+    self.assertNotIn("package-link", self.events())
+    self.assertEqual(self.state()["linked_repository"], foreign)
+    self.assertEqual(len(self.state()["releases"]), 1)
+    self.assertEqual(self.state()["aliases"]["latest"], self.state()["prepared"])
+
+  def test_completed_retry_finishes_only_missing_link_then_becomes_read_only(self):
+    self.change(link_fault="denied")
+    self.assertNotEqual(self.release().returncode, 0)
+    before = self.state()
+    self.reset_association()
+    result = self.release()
+    self.assertEqual(result.returncode, 0, result.stderr)
+    self.assert_no_publication_writes()
+    self.assertEqual(self.events().count("package-link"), 1)
+    self.assertEqual(self.state()["releases"], before["releases"])
+    self.assertEqual(self.state()["aliases"], before["aliases"])
+    (self.base / "events").write_text("")
+    self.assertEqual(self.release().returncode, 0)
+    self.assert_no_writes()
+
+  def test_completed_retry_refuses_foreign_association_without_writes(self):
+    self.assertEqual(self.release().returncode, 0)
+    foreign = self.target_repository() | {"full_name": "fixtures/foreign", "name": "foreign"}
+    self.change(linked_repository=foreign)
+    (self.base / "events").write_text("")
+    result = self.release()
+    self.assertNotEqual(result.returncode, 0)
+    self.assert_no_writes()
+    self.assertEqual(self.state()["linked_repository"], foreign)
+
+  def test_lost_link_response_is_reconciled_without_repeating_post(self):
+    self.change(link_fault="lost")
+    result = self.release()
+    self.assertEqual(result.returncode, 0, result.stderr)
+    self.assertEqual(self.events().count("package-link"), 1)
+    self.assertEqual(self.state()["linked_repository"], self.target_repository())
+
+  def test_hidden_foreign_link_is_refused_by_supported_server_without_reassignment(self):
+    foreign = self.target_repository() | {"id": 99, "full_name": "fixtures/private", "name": "private"}
+    self.change(linked_repository=foreign, hide_link=True)
+    result = self.release()
+    self.assertNotEqual(result.returncode, 0)
+    self.assertNotIn("Publication verified", result.stdout)
+    self.assertEqual(self.state()["linked_repository"], foreign)
+    self.assertEqual(self.events().count("package-link"), 1)
+    self.assertEqual(self.state()["package_reads"], 2, "HTTP refusals must not reconcile")
+
+  def test_unsupported_server_refuses_link_writes_but_allows_existing_correct_link(self):
+    self.change(gitea_version="1.24.6")
+    result = self.release()
+    self.assertNotEqual(result.returncode, 0)
+    self.assertIn("stable Gitea 1.25.x", result.stderr)
+    self.assertNotIn("package-link", self.events())
+    self.change(linked_repository=self.target_repository())
+    (self.base / "events").write_text("")
+    result = self.release()
+    self.assertEqual(result.returncode, 0, result.stderr)
+    self.assert_no_writes()
+    self.assertNotIn("http:GET:/api/v1/version", self.events())
+
+  def test_link_failures_preserve_publication_and_never_repeat_post(self):
+    self.assertEqual(self.release().returncode, 0)
+    publication = self.state()
+    for fault in ("transport", "timeout", "denied", "missing", "server", "wrong_status", "ignore", "conflict_after", "overflow"):
+      with self.subTest(fault=fault):
+        self.reset_association()
+        self.change(link_fault=fault)
+        result = self.release()
+        self.assertNotEqual(result.returncode, 0, fault)
+        self.assertNotIn("Publication verified", result.stdout)
+        self.assertEqual(self.events().count("package-link"), 1)
+        self.assert_no_publication_writes()
+        self.assertEqual(self.state()["releases"], publication["releases"])
+        self.assertEqual(self.state()["aliases"], publication["aliases"])
+        self.assertFalse(any("unlink" in event or "DELETE" in event for event in self.events()))
+        if fault == "overflow":
+          self.assertEqual(self.state()["linked_repository"], self.target_repository())
+          self.assertEqual(self.state()["package_reads"], 2, "Resource refusals must not reconcile")
+
+  def test_failed_association_prerequisite_never_authorizes_link(self):
+    self.assertEqual(self.release().returncode, 0)
+    for resource, kinds in (("target", ("missing", "unauthorized", "server", "redirect", "null", "wrong_name")),
+                            ("version", ("missing", "unauthorized", "server", "redirect", "null", "malformed", "transport")),
+                            ("package", ("missing", "unauthorized", "server", "redirect", "malformed", "null", "overflow",
+                                         "absent_repository", "wrong_name", "wrong_version", "transport", "timeout"))):
+      for kind in kinds:
+        with self.subTest(resource=resource, kind=kind):
+          self.reset_association()
+          self.change(association_fault={"resource": resource, "kind": kind})
+          result = self.release()
+          self.assertNotEqual(result.returncode, 0)
+          self.assertIn("association-read-injected:" + kind, self.events())
+          self.assertNotIn("Publication verified", result.stdout)
+          self.assert_no_writes()
+          self.assertIsNone(self.state()["linked_repository"])
+
+  def test_refreshed_identity_failure_blocks_link(self):
+    self.assertEqual(self.release().returncode, 0)
+    for resource, kind in (("target", "wrong_id"), ("package", "absent_repository")):
+      with self.subTest(resource=resource):
+        self.reset_association()
+        self.change(association_fault={"resource": resource, "read": 2, "kind": kind})
+        result = self.release()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("association-read-injected:" + kind, self.events())
+        self.assert_no_writes()
+
+  def test_post_link_verification_failure_does_not_undo_accepted_link(self):
+    self.assertEqual(self.release().returncode, 0)
+    for read, kind in ((3, "malformed"), (3, "transport"), (4, "null")):
+      with self.subTest(read=read, kind=kind):
+        self.reset_association()
+        self.change(association_fault={"resource": "package", "read": read, "kind": kind})
+        result = self.release()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertNotIn("Publication verified", result.stdout)
+        self.assertEqual(self.events().count("package-link"), 1)
+        self.assertEqual(self.state()["linked_repository"], self.target_repository())
+        self.assert_no_publication_writes()
+
+  def test_publication_change_after_link_prevents_success_without_rollback(self):
+    self.change(association_fault={"resource": "package", "read": 3, "kind": "change_latest"})
+    result = self.release()
+    self.assertNotEqual(result.returncode, 0)
+    self.assertNotIn("Publication verified", result.stdout)
+    self.assertEqual(self.state()["linked_repository"], self.target_repository())
+    self.assertNotEqual(self.state()["aliases"]["latest"], self.state()["prepared"])
+    self.assertEqual(self.events().count("promote"), 1)
+
+
 class BashDataTests(unittest.TestCase):
   def setUp(self):
     self.data = helper_module()
@@ -705,6 +871,119 @@ class BashDataTests(unittest.TestCase):
     raw = "HTTP/1.1 " + str(status) + " Fixture\r\n"
     raw += "".join(key + ": " + value + "\r\n" for key, value in (headers or {}).items()) + "\r\n"
     return 0, {"stdout": str(status).encode(), "headers": raw.encode(), "body": body}
+
+  def association_records(self):
+    config = {"gitea": "https://fixture.invalid", "repository": "fixtures/application",
+              "image": "fixture.invalid/fixtures/application-hello"}
+    repository = {"id": 17, "name": "application", "full_name": "fixtures/application", "owner": {"login": "fixtures"}}
+    package = {"id": 23, "name": "application-hello", "type": "container", "version": "latest",
+               "owner": {"login": "fixtures"}, "repository": None}
+    return config, repository, package
+
+  def test_association_routes_distinguish_image_and_repository_and_quote_segments(self):
+    config, _, _ = self.association_records()
+    self.assertEqual(self.data.package_routes(config), (
+      "https://fixture.invalid/api/v1/repos/fixtures/application",
+      "https://fixture.invalid/api/v1/packages/fixtures/container/application-hello/latest",
+      "https://fixture.invalid/api/v1/packages/fixtures/container/application-hello/-/link/application"))
+    routes = self.data.package_routes(config | {"repository": "fixtures/a?b", "image": "fixture.invalid/fixtures/a#b"})
+    self.assertTrue(routes[0].endswith("/a%3Fb"))
+    self.assertTrue(routes[1].endswith("/a%23b/latest"))
+    self.assertTrue(routes[2].endswith("/-/link/a%3Fb"))
+
+  def test_association_requires_explicit_null_and_strict_package_identity(self):
+    config, repository, package = self.association_records()
+    invalid = [None, [], {}, package | {"owner": None}, package | {"owner": {"login": "foreign"}},
+               package | {"type": "generic"}, package | {"name": "foreign"}, package | {"version": "other"},
+               package | {"id": True}, package | {"repository": {}}, package | {"repository": False},
+               {key: value for key, value in package.items() if key != "repository"}]
+    for record in invalid:
+      with self.subTest(record=record), patch.object(self.data, "api_document", return_value=record), self.assertRaises(self.data.Refusal):
+        self.data.package_linked("unused", config, "unused", repository["id"])
+    with patch.object(self.data, "api_document", return_value=package):
+      self.assertFalse(self.data.package_linked("unused", config, "unused", repository["id"]))
+    with patch.object(self.data, "api_document", return_value=package | {"repository": repository}):
+      self.assertTrue(self.data.package_linked("unused", config, "unused", repository["id"]))
+
+  def test_association_repository_identity_rejects_name_and_id_lookalikes(self):
+    config, repository, package = self.association_records()
+    for record in (repository | {"id": True}, repository | {"id": 0}, repository | {"id": "17"},
+                   repository | {"full_name": "foreign/application"}, repository | {"name": "foreign"},
+                   repository | {"owner": {"login": "foreign"}}, repository | {"id": 99}):
+      with self.subTest(record=record), patch.object(self.data, "api_document", return_value=package | {"repository": record}), \
+           self.assertRaises(self.data.Refusal):
+        self.data.package_linked("unused", config, "unused", repository["id"])
+
+  def test_package_check_is_read_only_and_refuses_unlinked(self):
+    config, repository, package = self.association_records()
+    for linked in (None, repository):
+      with self.subTest(linked=linked), patch.object(self.data, "api_document", side_effect=[repository, package | {"repository": linked}]), \
+           patch.object(self.data, "http") as http:
+        if linked is None:
+          with self.assertRaises(self.data.Refusal):
+            self.data.package_association("unused", config)
+        else:
+          self.data.package_association("unused", config)
+        http.assert_not_called()
+
+  def test_association_empty_201_and_lost_transport_reconcile_exactly_once(self):
+    config, repository, package = self.association_records()
+    for post in ((201, {}, b""), self.data.CommandFailed("HTTPS request failed")):
+      replies = [(200, {}, self.data.canonical(record)) for record in (repository, package, {"version": "1.25.0"}, repository, package)]
+      replies += [post, (200, {}, self.data.canonical(package | {"repository": repository}))]
+      with self.subTest(post=post), patch.object(self.data, "http", side_effect=replies) as http:
+        self.data.package_association("unused", config, ensure=True)
+        self.assertEqual([call.args[1] for call in http.call_args_list], ["GET", "GET", "GET", "GET", "GET", "POST", "GET"])
+        self.assertEqual(http.call_args_list[5].args[2], self.data.package_routes(config)[2])
+        self.assertEqual(http.call_args_list[5].kwargs, {})
+
+  def test_association_refusal_after_post_never_reconciles(self):
+    config, repository, package = self.association_records()
+    for failure in (self.data.Refusal("Command output exceeds byte limit"), (401, {}, b"PRIVATE_REMOTE_BODY"),
+                    (404, {}, b"PRIVATE_REMOTE_BODY"), (200, {}, b"PRIVATE_REMOTE_BODY")):
+      with self.subTest(failure=failure), \
+           patch.object(self.data, "api_document", side_effect=[repository, package, {"version": "1.25.0"}, repository, package]) as read, \
+           patch.object(self.data, "http", side_effect=[failure]) as http:
+        with self.assertRaises(self.data.Refusal) as raised:
+          self.data.package_association("unused", config, ensure=True)
+        self.assertNotIn("PRIVATE_REMOTE_BODY", str(raised.exception))
+        self.assertEqual(read.call_count, 5)
+        self.assertEqual(http.call_count, 1)
+
+  def test_package_link_http_accepts_empty_201_without_json_parsing(self):
+    with patch.object(self.data, "capture", return_value=self.http_reply(201, b"")):
+      self.assertEqual(self.data.http("unused", "POST", "https://fixture.invalid/link"), (201, {}, b""))
+
+  def test_unknown_server_contract_cannot_authorize_link_writes(self):
+    config, repository, package = self.association_records()
+    for server in (None, {}, {"version": None}, {"version": "1.24.6"}, {"version": "1.26.0"},
+                   {"version": "1.25.0-dev"}, {"version": "1.25.00"}, {"version": "PRIVATE_REMOTE_BODY"}):
+      with self.subTest(server=server), patch.object(self.data, "api_document", side_effect=[repository, package, server]) as read, \
+           patch.object(self.data, "http") as http:
+        with self.assertRaises(self.data.Refusal) as raised:
+          self.data.package_association("unused", config, ensure=True)
+        self.assertNotIn("PRIVATE_REMOTE_BODY", str(raised.exception))
+        self.assertEqual(read.call_count, 3)
+        http.assert_not_called()
+
+  def test_lost_link_response_requires_exact_readback_not_another_post(self):
+    config, repository, package = self.association_records()
+    for record in (package, package | {"repository": repository | {"id": 99}}, None):
+      replies = [(200, {}, self.data.canonical(value)) for value in (repository, package, {"version": "1.25.0"}, repository, package)]
+      replies += [self.data.CommandFailed("HTTPS request failed"), (200, {}, self.data.canonical(record))]
+      with self.subTest(record=record), patch.object(self.data, "http", side_effect=replies) as http, \
+           self.assertRaises(self.data.Refusal):
+        self.data.package_association("unused", config, ensure=True)
+      self.assertEqual([call.args[1] for call in http.call_args_list].count("POST"), 1)
+      self.assertEqual(http.call_count, 7)
+
+  def test_refreshed_correct_link_skips_post_and_preserves_other_fields(self):
+    config, repository, package = self.association_records()
+    records = [repository, package, {"version": "1.25.0"}, repository,
+               package | {"repository": repository, "html_url": "https://untrusted.invalid"}]
+    with patch.object(self.data, "api_document", side_effect=records), patch.object(self.data, "http") as http:
+      self.data.package_association("unused", config, ensure=True)
+      http.assert_not_called()
 
   def test_same_origin_bearer_challenge_retries_with_private_token(self):
     body = b'{"schemaVersion":2}'
@@ -780,6 +1059,34 @@ if "$2"; then echo continued; fi
     self.assertEqual(len(output), 64)
     with self.assertRaisesRegex(self.data.Refusal, "byte limit"):
       self.data.command([sys.executable, "-c", "import sys; sys.stdout.buffer.write(b'x'*65)"], 64)
+
+  def test_association_guard_failures_remain_fatal_in_conditional_callers(self):
+    script = '''set -Eeuo pipefail
+source "$1"
+root=unused work=$2 commit=commit prepared=digest
+fault=$3 fault_status=$4
+scan() { :; }
+tag_state() { remote_oid=tag remote_commit=commit release_record='{}'; }
+data() {
+  if [[ "$1" == "$fault" ]]; then return "$fault_status"; fi
+  case "$1" in
+    image|resolve) echo digest ;;
+    package-ensure) echo mutation ;;
+    release-check|package-check) : ;;
+    *) exit 10 ;;
+  esac
+}
+if associate_package tag; then echo continued; fi
+'''
+    with tempfile.TemporaryDirectory() as work:
+      for fault in ("release-check", "image", "resolve"):
+        for status in (1, 2):
+          with self.subTest(fault=fault, status=status):
+            result = subprocess.run(["bash", "-c", script, "fixture", str(ROOT / "scripts/release-common.sh"), work, fault, str(status)],
+                                    capture_output=True, text=True)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertNotIn("mutation", result.stdout)
+            self.assertNotIn("continued", result.stdout)
 
   def test_unending_producer_and_stderr_are_bounded(self):
     with self.assertRaisesRegex(self.data.Refusal, "byte limit"):

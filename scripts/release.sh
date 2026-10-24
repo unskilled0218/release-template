@@ -86,6 +86,7 @@ if [[ -n "$remote_oid" || -n "$release_record" ]]; then
   field "$work/inventory.json" release > "$work/release.json"
   data release-check "$root" "$commit" "$work/release.json"
   [[ $(data resolve "$root" "$work" latest) == "$prepared" ]] || stop 'Completed latest changed during verification'
+  associate_package "$remote_oid"
   success
   exit 0
 fi
@@ -138,4 +139,5 @@ tag_state
 printf '%s\n' "$release_record" > "$work/release.json"
 data release-check "$root" "$commit" "$work/release.json"
 [[ $(data image "$root" "$work" "$prepared" "$commit") == "$prepared" && $(data resolve "$root" "$work" latest) == "$prepared" ]] || stop 'Final image verification failed'
+associate_package "$oid"
 success

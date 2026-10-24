@@ -184,8 +184,43 @@ url = urlsplit(arguments[-1])
 method = arguments[arguments.index("--request") + 1]
 route = unquote(url.path)
 status, headers, body = 200, {}, None
+raw_body = None
+target_repository = {"id": 17, "name": "application", "full_name": "fixtures/application", "owner": {"login": "fixtures"}}
+association_resource = None
 event("http:" + method + ":" + route)
-if route.endswith("/releases") and method == "POST":
+if route == "/api/v1/version" and method == "GET":
+  association_resource = "version"
+  body = {"version": state.get("gitea_version", "1.25.0")}
+elif route == "/api/v1/repos/fixtures/application" and method == "GET":
+  association_resource = "target"
+  body = target_repository
+elif route == "/api/v1/packages/fixtures/container/application-hello/latest" and method == "GET":
+  association_resource = "package"
+  body = {"id": 23, "owner": {"login": "fixtures"}, "type": "container", "name": "application-hello",
+          "version": "latest", "repository": None if state.get("hide_link") else state.get("linked_repository")}
+  if "latest" not in state["aliases"]:
+    status = 404
+elif route == "/api/v1/packages/fixtures/container/application-hello/-/link/application" and method == "POST":
+  event("package-link")
+  assert "--data-binary" not in arguments
+  assert auth.name == "api.curl"
+  fault = state.get("link_fault")
+  if fault in ("transport", "timeout"):
+    sys.exit(28 if fault == "timeout" else 7)
+  if state.get("linked_repository") is not None:
+    status = 400
+  elif fault in ("denied", "missing", "server", "wrong_status"):
+    status = {"denied": 403, "missing": 404, "server": 500, "wrong_status": 200}[fault]
+  else:
+    if fault != "ignore":
+      state["linked_repository"] = target_repository if fault != "conflict_after" else target_repository | {"id": 99}
+    save()
+    status, raw_body = 201, b""
+    if fault == "overflow":
+      raw_body = b" " * 4194305
+    if fault == "lost":
+      sys.exit(7)
+elif route.endswith("/releases") and method == "POST":
   event("release-post")
   if state.get("fail_release"):
     sys.exit(7)
@@ -236,7 +271,36 @@ else:
   raise AssertionError("Unexpected fixture HTTP route")
 if state.get("status"):
   status = state["status"]
-data = encode(body)
+if association_resource:
+  count_key = association_resource + "_reads"
+  state[count_key] = state.get(count_key, 0) + 1
+  fault = state.get("association_fault", {})
+  if fault.get("resource") == association_resource and state[count_key] == fault.get("read", 1):
+    kind = fault["kind"]
+    event("association-read-injected:" + kind)
+    if kind in ("transport", "timeout"):
+      save()
+      sys.exit(28 if kind == "timeout" else 7)
+    if kind in ("missing", "unauthorized", "server", "redirect"):
+      status = {"missing": 404, "unauthorized": 401, "server": 500, "redirect": 302}[kind]
+    elif kind in ("malformed", "overflow"):
+      raw_body = b"{broken" if kind == "malformed" else b" " * 4194305
+    elif kind == "null":
+      body = None
+    elif kind == "absent_repository":
+      body.pop("repository")
+    elif kind == "wrong_name":
+      body["name"] = "another-package"
+    elif kind == "wrong_version":
+      body["version"] = "rt-foreign"
+    elif kind == "wrong_id":
+      body["id"] = 99
+    elif kind == "change_latest":
+      state["aliases"]["latest"] = store({"foreign": True})
+    else:
+      raise AssertionError("Unexpected association fault")
+  save()
+data = encode(body) if raw_body is None else raw_body
 if route.startswith("/v2/"):
   if fault == "overflow":
     data = b" " * 4194305

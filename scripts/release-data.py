@@ -337,6 +337,72 @@ def http(work, method, url, auth_name="api.curl", payload=None, limit=API_LIMIT,
   return code, headers, output["body"]
 
 
+def api_document(work, url):
+  status, _, body = http(work, "GET", url)
+  require(status == 200, "Package association evidence unavailable")
+  return decode(body)
+
+
+def repository_identity(record, repository):
+  owner, name = repository.split("/")
+  require(isinstance(record, dict) and type(record.get("id")) is int and record["id"] > 0 and
+          record.get("full_name") == repository and record.get("name") == name and
+          isinstance(record.get("owner"), dict) and record["owner"].get("login") == owner,
+          "Package repository identity differs")
+  return record["id"]
+
+
+def package_routes(config):
+  _, owner, name = config["image"].split("/")
+  base = config["gitea"] + "/api/v1/"
+  package = base + "packages/" + quote(owner, safe="") + "/container/" + quote(name, safe="")
+  target = base + "repos/" + "/".join(quote(part, safe="") for part in config["repository"].split("/"))
+  link = package + "/-/link/" + quote(config["repository"].split("/")[1], safe="")
+  return target, package + "/latest", link
+
+
+def package_linked(work, config, package_url, target_id):
+  record = api_document(work, package_url)
+  _, owner, name = config["image"].split("/")
+  require(isinstance(record, dict) and type(record.get("id")) is int and record["id"] > 0 and
+          isinstance(record.get("owner"), dict) and record["owner"].get("login") == owner and
+          record.get("type") == "container" and record.get("name") == name and
+          record.get("version") == "latest" and "repository" in record, "Package identity or association evidence differs")
+  if record["repository"] is None:
+    return False
+  require(repository_identity(record["repository"], config["repository"]) == target_id,
+          "Package is linked to a different repository; reassignment refused")
+  return True
+
+
+def package_association(work, config, ensure=False):
+  """Only explicit unlinked evidence authorizes one POST, under operator writer exclusion."""
+  target_url, package_url, link_url = package_routes(config)
+  target_id = repository_identity(api_document(work, target_url), config["repository"])
+  if package_linked(work, config, package_url, target_id):
+    return
+  require(ensure, "Package is not linked to the configured repository")
+  # Gitea can hide inaccessible links as null. Require a server family whose link
+  # service rejects already-linked packages instead of replacing their association.
+  server = api_document(work, config["gitea"] + "/api/v1/version")
+  require(isinstance(server, dict) and isinstance(server.get("version"), str) and
+          re.fullmatch(r"1\.25\.(0|[1-9][0-9]*)", server["version"]),
+          "Package link writes require supported stable Gitea 1.25.x; server association safety is unverified")
+  # Refresh both identities immediately before mutation; never treat failed reads as permission.
+  require(repository_identity(api_document(work, target_url), config["repository"]) == target_id,
+          "Package target repository changed")
+  if package_linked(work, config, package_url, target_id):
+    return
+  try:
+    status, _, _ = http(work, "POST", link_url)
+    require(status == 201, "Package association POST failed; inspect without rollback")
+  except CommandFailed:
+    # The server may have accepted the write. Reconcile once without repeating it.
+    pass
+  require(package_linked(work, config, package_url, target_id),
+          "Package association incomplete or uncertain; inspect without rollback")
+
+
 def registry(work, origin, image, kind, reference, missing=False):
   repository = image.split("/", 1)[1]
   route = "/v2/" + repository + "/" + kind + "/" + quote(reference, safe="")
@@ -564,6 +630,9 @@ def dispatch(args):
   elif action == "inventory":
     root, work, output = args
     write(output, inventory(root, work, settings(root)))
+  elif action in ("package-check", "package-ensure"):
+    root, work = args
+    package_association(work, settings(root), ensure=action == "package-ensure")
   elif action == "make-tag":
     root, commit, reference, predecessor, output = args
     require(digest(reference) and (not predecessor or digest(predecessor)), "Invalid image digest")

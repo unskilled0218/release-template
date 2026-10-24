@@ -42,6 +42,26 @@ fresh_guard() {
   fi
   alias_guard
 }
+publication_guard() {
+  local expected_oid=$1 current_image current_latest
+  scan
+  tag_state
+  [[ "$remote_oid" == "$expected_oid" && "$remote_commit" == "$commit" && -n "$release_record" ]] || stop 'Completed publication changed before association'
+  printf '%s\n' "$release_record" > "$work/release.json"
+  data release-check "$root" "$commit" "$work/release.json" || stop 'Cannot verify release before association'
+  current_image=$(data image "$root" "$work" "$prepared" "$commit") || stop 'Cannot verify bound image before association'
+  [[ "$current_image" == "$prepared" ]] || stop 'Bound image changed before association'
+  current_latest=$(data resolve "$root" "$work" latest) || stop 'Cannot verify latest before association'
+  [[ "$current_latest" == "$prepared" ]] || stop 'Latest differs before association'
+}
+associate_package() {
+  local expected_oid=$1
+  phase='package association'
+  publication_guard "$expected_oid"
+  data package-ensure "$root" "$work" || stop 'Package association failed or uncertain'
+  publication_guard "$expected_oid"
+  data package-check "$root" "$work" || stop 'Cannot verify final package association'
+}
 success() {
   printf 'Publication verified: %s\nImage: %s@%s\nLatest: %s:latest\nRelease: %s/%s/releases/tag/%s\n' \
     "$tag" "$image" "$prepared" "$image" "$origin" "$repository" "$tag"
