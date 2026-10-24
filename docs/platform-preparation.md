@@ -6,7 +6,7 @@
 
 ## Install AMD64 and ARM64 emulation
 
-An authorized host administrator must run these commands before the two-platform release test:
+Only an authorized host administrator may run these optional preparation commands when the selected hosts need emulation rather than native platform nodes:
 
 ```sh
 docker run --privileged --rm tonistiigi/binfmt --install amd64,arm64
@@ -26,4 +26,4 @@ docker run --rm --platform linux/amd64 ubuntu:24.04 echo "Hello World"
 docker run --rm --platform linux/arm64 ubuntu:24.04 echo "Hello World"
 ```
 
-Both commands must exit successfully and print `Hello World`. They may pull Ubuntu images. These checks verify architecture execution only; they do not verify the release fixture's default command, registry publication, digest promotion, or cleanup safety. Follow the release test's separate checks for those outcomes.
+Both commands must exit successfully and print `Hello World`. They may pull Ubuntu images and require separate approval before execution. These checks verify architecture execution only; they do not verify this project's image, registry publication, digest promotion, or deletion safety. Use [image usage](image-usage.md) for separately approved checks of the published image, and retain the [verification limits](verification.md).

@@ -3,8 +3,6 @@
 .template-*
 tasks
 tests
-release_template
-examples
 scripts
 docs
 .env*

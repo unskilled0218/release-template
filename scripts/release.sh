@@ -9,7 +9,7 @@ case "${1:-}" in
     echo 'No arguments: build and publish the configured project. Setup: scripts/release.json and a private token file.'
     exit 0 ;;
   --validate|'') ;;
-  *) echo 'Unsupported arguments; use scripts/legacy-release.sh for the old Python CLI.' >&2; exit 2 ;;
+  *) echo 'Unsupported arguments. Usage: ./scripts/release.sh [--validate | --help]' >&2; exit 2 ;;
 esac
 [[ $# -le 1 ]] || exit 2
 root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
@@ -25,7 +25,7 @@ for tool in git docker curl; do
   command -v "$tool" >/dev/null || stop "Required command unavailable: $tool"
 done
 for marker in release-template.lock.json scripts/release-template .template-transaction; do
-  [[ ! -e "$root/$marker" && ! -L "$root/$marker" ]] || stop 'Managed/unfinished legacy installation; use its original pin and legacy-release.sh'
+  [[ ! -e "$root/$marker" && ! -L "$root/$marker" ]] || stop 'Old installation state; use its preserved original checkout/pin, not this command'
 done
 if [[ -z "${RELEASE_LOCK_FD:-}" ]]; then
   exec python3 -B "$root/scripts/release-data.py" locked "$root" "$root/scripts/release.sh"

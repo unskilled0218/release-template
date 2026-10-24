@@ -1,5 +1,0 @@
-.release-template/
-.template-operation.lock
-.template-transaction/
-__pycache__/
-*.pyc

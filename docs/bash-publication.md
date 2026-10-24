@@ -5,6 +5,7 @@
   - [Retry states](#retry-states)
   - [Resource limits](#resource-limits)
   - [Limits of authority](#limits-of-authority)
+  - [Known limits](#known-limits)
 
 ## Sequence
 
@@ -14,7 +15,7 @@ Before any staging lookup that could build, complete bounded release/tag invento
 
 Prerequisite reads have explicit failure branches; they are not evaluated as mutation permission inside a Bash comparison. The final promotion decision validates the same successfully read alias against the captured predecessor and prepared digest. A failed/oversized/malformed read or a newly foreign alias stops before promotion or release creation; an already-prepared alias skips duplicate promotion. No failure refreshes the predecessor or authorizes rollback.
 
-Machine identity uses the separate `container-release-bash/1` annotation, not the Python schema-2 protocol. It binds source, configuration/script hashes, version, image/digest/platforms, predecessor, and notes hash/path. Fixed tagger identity/time and canonical JSON allow exact local reconstruction. Local refs are never overwritten; remote tag pushes are non-force. Existing old-format history is preserved, not adopted as new-format ownership.
+Machine identity uses the `container-release-bash/1` annotation. It binds source, configuration/script hashes, version, image/digest/platforms, predecessor, and notes hash/path. Fixed tagger identity/time and canonical JSON allow exact local reconstruction. Local refs are never overwritten; remote tag pushes are non-force. Existing old-format history is preserved, not adopted as new-format ownership. The removed engine is not required to verify current-format evidence; historical transactions still require their original preserved checkout/pin.
 
 Success prints the version, immutable image, latest alias, and release URL and returns zero. There is no automatic cleanup stage, so missing deletion evidence is not a post-publication failure in this workflow.
 
@@ -40,4 +41,8 @@ Each inventory scan shares limits of 1,002 API pages, 100,000 API/ref records, 6
 
 The workflow supports one image and two platforms, not arbitrary hooks, suites, archive attachments, managed upgrades, automatic tests of consumer applications, package linking, retention, local-image removal, or old-checkpoint migration. Run application tests separately before committing/pushing the release source. A pullable image can require separately authorized package association before appearing in a repository's Packages tab; this command never reassigns it.
 
-Fresh version/source/alias checks detect conflicts but cannot make cross-service operations atomic or exclude writers in other checkouts. Keep operational writer exclusion through completion. No live 0.3.1 publication, runtime/emulation result, power-loss durability, storage behavior, or deletion safety follows from local fake-port tests. Earlier v0.2.5 live results remain historical.
+Fresh version/source/alias checks detect conflicts but cannot make cross-service operations atomic or exclude writers in other checkouts. Keep operational writer exclusion through completion. No live 0.4.0 publication, runtime/emulation result, power-loss durability, storage behavior, or deletion safety follows from local fake-port tests. Earlier v0.2.5 live results remain historical.
+
+## Known limits
+
+Two warnings from the [task 13 review](../tasks/_archives/13-fix-bash-release-review-warnings/5-code-review.md#top-findings) remain unresolved. N1: after promotion is confirmed, a later guard still accepts the captured predecessor alias and can send a release POST before final verification refuses. N2: private Docker auth preserves builder state but can lose a Buildx executable installed only in the original config's plugin directory, or select a different system plugin after preflight. Removing legacy support fixes neither warning. Resolve them separately before claiming publication readiness or general Docker setup compatibility; do not use blind retries, automatic repair, or rollback as workarounds.

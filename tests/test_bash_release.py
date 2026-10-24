@@ -1,5 +1,6 @@
 """Exercise the Bash entry point without credentials, Docker, or production services."""
 
+import ast
 import importlib.util
 import json
 import os
@@ -29,10 +30,36 @@ class BashInterfaceTests(unittest.TestCase):
     self.assertEqual(result.returncode, 0, result.stderr)
     self.assertIn("no credentials or remote operations", result.stdout)
 
-  def test_old_options_point_to_explicit_legacy_entry(self):
+  def test_old_options_refuse_with_supported_usage(self):
     result = subprocess.run(["bash", str(ROOT / "scripts/release.sh"), "publish"], capture_output=True, text=True)
     self.assertNotEqual(result.returncode, 0)
-    self.assertIn("legacy-release.sh", result.stderr)
+    self.assertIn("Usage: ./scripts/release.sh [--validate | --help]", result.stderr)
+    self.assertNotIn("legacy-release.sh", result.stderr)
+
+  def test_supported_tree_has_no_retired_tooling_or_imports(self):
+    for name in ("release_template", "examples", "scripts/launch.py", "scripts/update.py",
+                 "scripts/legacy-release.sh", "tests/support.py"):
+      with self.subTest(path=name):
+        self.assertFalse((ROOT / name).exists())
+        self.assertFalse((ROOT / name).is_symlink())
+    for directory in ("scripts", "tests"):
+      for path in (ROOT / directory).rglob("*.py"):
+        for node in ast.walk(ast.parse(path.read_text())):
+          imports = [alias.name for alias in node.names] if isinstance(node, ast.Import) else \
+                    [node.module or ""] if isinstance(node, ast.ImportFrom) else []
+          self.assertFalse(any(name.split(".")[0] == "release_template" or name == "tests.support"
+                               for name in imports), str(path))
+
+  def test_root_version_drives_settings_readme_and_notes(self):
+    config = helper_module().settings(ROOT)
+    version = (ROOT / "VERSION").read_text().strip()
+    self.assertEqual(config["version"], version)
+    self.assertEqual(config["tag"], "v" + version)
+    self.assertEqual(config["notes"], "docs/releases/" + version + ".md")
+    self.assertTrue((ROOT / config["notes"]).read_text().startswith("# Release v" + version + "\n"))
+    readme = (ROOT / "README.md").read_text()
+    self.assertIn("Version " + version, readme)
+    self.assertIn("](docs/releases/" + version + ".md)", readme)
 
 
 def helper_module():
@@ -420,15 +447,96 @@ class BashPublicationTests(unittest.TestCase):
     self.assertEqual(self.events(), [])
 
   def test_legacy_markers_and_non_main_refuse(self):
-    for name in ("release-template.lock.json", ".template-transaction", ".release-template/v1.0.0.json"):
+    for name in ("release-template.lock.json", "scripts/release-template", ".template-transaction", ".release-template/v1.0.0.json"):
       path = self.root / name
       path.parent.mkdir(exist_ok=True)
-      path.write_text("legacy")
-      self.assertNotEqual(self.release().returncode, 0)
-      path.unlink()
+      if name == "scripts/release-template":
+        path.mkdir()
+      else:
+        path.write_text("legacy")
+      result = self.release()
+      self.assertNotEqual(result.returncode, 0)
+      self.assertNotIn("legacy-release.sh", result.stderr)
+      self.assertIn("original", result.stderr)
+      self.assert_no_writes()
+      if path.is_dir():
+        path.rmdir()
+      else:
+        path.unlink()
     self.git("switch", "--quiet", "-c", "task")
     self.assertNotEqual(self.release().returncode, 0)
     self.assert_no_writes()
+
+  def test_unsupported_options_refuse_before_credentials_or_commands(self):
+    self.token.unlink()
+    for arguments in (("publish",), ("resume",), ("--config", "missing.json"), ("--unknown",)):
+      with self.subTest(arguments=arguments):
+        result = self.release(*arguments)
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("Usage:", result.stderr)
+        self.assertNotIn("legacy-release.sh", result.stderr)
+        self.assertEqual(self.events(), [])
+        self.assertFalse((self.root / ".template-operation.lock").exists())
+
+  def test_old_marker_symlinks_refuse_without_touching_targets(self):
+    for name in ("release-template.lock.json", "scripts/release-template", ".template-transaction", ".release-template/v1.0.0.json"):
+      for target in (self.token, self.base / "missing-old-state"):
+        with self.subTest(marker=name, target=target.name):
+          path = self.root / name
+          path.parent.mkdir(exist_ok=True)
+          path.symlink_to(target)
+          result = self.release()
+          self.assertNotEqual(result.returncode, 0)
+          self.assertIn("original", result.stderr)
+          self.assertNotIn("legacy-release.sh", result.stderr)
+          self.assertTrue(path.is_symlink())
+          self.assertEqual(self.token.read_text(), "SENTINEL_PRIVATE_TOKEN\n")
+          self.assert_no_writes()
+          path.unlink()
+
+  def test_notes_use_literal_committed_blobs_and_narrow_normalization(self):
+    data = helper_module()
+    raw = b"# Release v1.0.0\r\n\r\nProject  fixes.\rKeep spaces.  \r\n\r\n"
+    literal = "notes with space*.md"
+    (self.root / literal).write_bytes(raw)
+    (self.root / "notes-link.md").symlink_to("notes.md")
+    self.commit()
+    commit = self.git("rev-parse", "HEAD")
+    config = data.settings(self.root) | {"notes": literal}
+    (self.root / literal).write_text("Uncommitted replacement")
+    self.assertEqual(data.blob(self.root, commit, literal), raw)
+    self.assertEqual(data.notes(self.root, commit, config), "# Release v1.0.0\n\nProject  fixes.\nKeep spaces.  \n")
+    for name in ("notes-link.md", "scripts", "notes with space?.md"):
+      with self.subTest(path=name), self.assertRaises(data.Refusal):
+        data.blob(self.root, commit, name)
+
+  def test_notes_invalid_utf8_content_and_size_refuse(self):
+    data = helper_module()
+    config = data.settings(self.root)
+    for raw in (b"\xff", b"# Release v1.0.0\n", b"# Release v1.0.0\n\nBad\x00text\n", b"x" * 65537):
+      with self.subTest(content=raw[:30]):
+        (self.root / "notes.md").write_bytes(raw)
+        self.commit()
+        with self.assertRaises((data.Refusal, UnicodeError)):
+          data.notes(self.root, self.git("rev-parse", "HEAD"), config)
+
+  def test_annotation_roundtrip_is_deterministic_and_conflicts_refuse(self):
+    data = helper_module()
+    commit = self.git("rev-parse", "HEAD")
+    config = data.settings(self.root)
+    identity = data.base_identity(self.root, commit, config) | {"digest": "sha256:" + "a" * 64, "predecessor": None}
+    oid = data.create_tag(self.root, identity)
+    self.assertEqual(data.create_tag(self.root, identity), oid)
+    self.assertEqual(data.inspect_tag(self.root, commit, oid, config), identity)
+    self.assertEqual(self.git("cat-file", "tag", oid).encode() + b"\n", data.tag_bytes(identity))
+    self.assertEqual(self.git("tag", "--list"), "")
+    for change in ({"extra": True}, {"repository": "foreign/project"}, {"digest": "latest"}, {"predecessor": "bad"}):
+      with self.subTest(change=change), self.assertRaises(data.Refusal):
+        foreign = data.create_tag(self.root, identity | change)
+        data.inspect_tag(self.root, commit, foreign, config)
+    self.git("tag", "v1.0.0")
+    with self.assertRaisesRegex(data.Refusal, "Local tag conflicts"):
+      data.create_tag(self.root, identity)
 
   def test_newer_publication_and_repeated_pages_refuse(self):
     self.change(releases=[{"id": 2, "tag_name": "v2.0.0", "draft": False, "prerelease": False}])
@@ -592,6 +700,61 @@ class BashPublicationTests(unittest.TestCase):
 class BashDataTests(unittest.TestCase):
   def setUp(self):
     self.data = helper_module()
+
+  def http_reply(self, status, body, headers=None):
+    raw = "HTTP/1.1 " + str(status) + " Fixture\r\n"
+    raw += "".join(key + ": " + value + "\r\n" for key, value in (headers or {}).items()) + "\r\n"
+    return 0, {"stdout": str(status).encode(), "headers": raw.encode(), "body": body}
+
+  def test_same_origin_bearer_challenge_retries_with_private_token(self):
+    body = b'{"schemaVersion":2}'
+    digest = self.data.sha(body)
+    replies = [self.http_reply(401, b"{}", {"WWW-Authenticate": 'Bearer realm="https://fixture.invalid/token",service="registry"'}),
+               self.http_reply(200, b'{"token":"FIXTURE_BEARER_TOKEN"}'),
+               self.http_reply(200, body, {"Docker-Content-Digest": digest})]
+    with tempfile.TemporaryDirectory(dir="/tmp/opencode") as work, patch.object(self.data, "capture", side_effect=replies) as capture:
+      self.assertEqual(self.data.registry(work, "https://fixture.invalid", "fixture.invalid/fixtures/application",
+                                          "manifests", digest), (digest, {"schemaVersion": 2}))
+      calls = [call.args[0] for call in capture.call_args_list]
+      self.assertEqual(len(calls), 3)
+      self.assertEqual(calls[0][-1], calls[2][-1])
+      self.assertIn("scope=repository%3Afixtures%2Fapplication%3Apull", calls[1][-1])
+      self.assertEqual(Path(calls[1][calls[1].index("--config") + 1]).name, "registry.curl")
+      self.assertEqual(Path(calls[2][calls[2].index("--config") + 1]).name, "bearer.curl")
+      self.assertEqual((Path(work) / "bearer.curl").read_text(), 'header = "Authorization: Bearer FIXTURE_BEARER_TOKEN"\n')
+      for args in calls:
+        self.assertEqual(args[:2], ["curl", "-q"])
+        self.assertNotIn("--location", args)
+        self.assertNotIn("--insecure", args)
+        self.assertNotIn("FIXTURE_BEARER_TOKEN", " ".join(args))
+
+  def test_registry_absence_does_not_hide_http_auth_json_or_digest_errors(self):
+    arguments = ("unused", "https://fixture.invalid", "fixture.invalid/fixtures/application", "manifests")
+    with patch.object(self.data, "capture", return_value=self.http_reply(404, b"{}")):
+      self.assertIsNone(self.data.registry(*arguments, "latest", missing=True))
+      with self.assertRaises(self.data.Refusal):
+        self.data.registry(*arguments, "latest")
+    body = b'{"schemaVersion":2}'
+    for reply, reference in ((self.http_reply(401, b"{}"), "latest"),
+                             (self.http_reply(500, b"{}"), "latest"),
+                             (self.http_reply(302, b"{}"), "latest"),
+                             (self.http_reply(200, b"{broken"), "latest"),
+                             (self.http_reply(200, body), "sha256:" + "0" * 64),
+                             (self.http_reply(200, body, {"Docker-Content-Digest": "sha256:" + "0" * 64}), "latest")):
+      with self.subTest(status=reply[1]["stdout"], reference=reference), \
+           patch.object(self.data, "capture", return_value=reply), self.assertRaises((self.data.Refusal, ValueError)):
+        self.data.registry(*arguments, reference, missing=True)
+    with patch.object(self.data, "capture", return_value=self.http_reply(200, b"null")):
+      config = {"gitea": arguments[1], "image": arguments[2]}
+      with self.assertRaisesRegex(self.data.Refusal, "two-platform"):
+        self.data.image("unused", config, "latest", "a" * 40, missing=True)
+
+  def test_foreign_bearer_realm_stops_before_token_request(self):
+    reply = self.http_reply(401, b"{}", {"WWW-Authenticate": 'Bearer realm="https://foreign.invalid/token"'})
+    with patch.object(self.data, "capture", return_value=reply) as capture:
+      with self.assertRaisesRegex(self.data.Refusal, "same-origin"):
+        self.data.registry("unused", "https://fixture.invalid", "fixture.invalid/fixtures/application", "manifests", "latest")
+      self.assertEqual(capture.call_count, 1)
 
   def test_guard_read_failures_remain_fatal_in_conditional_callers(self):
     script = '''set -Eeuo pipefail
