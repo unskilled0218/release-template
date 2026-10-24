@@ -22,7 +22,7 @@ To preserve the goal's no-reassignment requirement, new association writes requi
 
 ## Verification
 
-- The earlier sequential discovery run passed 93 tests in 518.037 seconds before the final safety/test additions. At the user's request, this implementation is committed while the final 99-test rerun remains pending. No complete final-state suite pass is claimed. The rerun uses four isolated subprocess workers over the complete discovered suite with workspace-backed temporary directories.
+- The earlier sequential discovery run passed 93 tests in 518.037 seconds before the final safety/test additions. Implementation commit `c746ecd` was made at the user's request while final verification was pending. The final complete suite subsequently passed all 99 tests in 194.0 seconds using four isolated subprocess workers with workspace-backed temporary directories. Worker results were 25, 25, 25, and 24 passing tests, with no failures or errors.
 - The final data-helper subset passed all 28 tests before resuming implementation.
 - Static comparison against the committed baseline confirms all 75 existing test methods remain, with 24 added methods and 99 total. Parallel verification uses `unittest.defaultTestLoader.discover("tests", top_level_dir=".")` and distributes every discovered test ID across four isolated `python3 -B -m unittest -v` subprocesses; no tests are skipped.
 - `bash -n scripts/release.sh scripts/release-common.sh` passed.
