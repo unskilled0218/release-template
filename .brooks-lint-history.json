@@ -262,5 +262,16 @@
       "suggestion": 0
     },
     "scope": "Plan-only review of tasks/14-remove-legacy-release-support/2-plan.md through 12b1a8b; explicit legacy dependency retirement, retained old-state refusals, behavior-based test migration, active/history documentation separation, and root-only 0.4.0 version authority; 322 methods counted statically, including 65 retained Bash methods; N1/N2 remain separate unresolved defects; implementation unverified; no tests or live operations"
+  },
+  {
+    "date": "2026-10-24",
+    "mode": "Health Dashboard",
+    "score": 99,
+    "findings": {
+      "critical": 0,
+      "warning": 1,
+      "suggestion": 0
+    },
+    "scope": "Branch 14-remove-legacy-release-support through 2b0dafd vs main at da45c00; all 65 changed files, 52 tracked legacy deletions; 75 tests pass; 65 Bash methods retained with one intentional rename and 10 added; new Bearer test unconditionally requires harness-only /tmp/opencode, reproduced with controlled missing-parent injection; inherited N1/N2 remain separate unresolved publication defects; no fixes or live operations"
   }
 ]
