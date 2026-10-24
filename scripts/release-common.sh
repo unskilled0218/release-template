@@ -3,9 +3,51 @@
 
 data() { python3 -B "$root/scripts/release-data.py" "$@"; }
 field() { data field "$1" "$2"; }
-stop() { echo "Release stopped (${phase:-local setup}): $*; inspect partial state without rollback" >&2; exit 1; }
+progress() { printf 'Release progress: %s\n' "$1" >&2; }
+stage() { phase=$1; progress "$phase"; }
+recovery() {
+  case "${phase:-local setup}" in
+    'local setup'|'prerequisite checks')
+      echo 'Next: review required tools, configuration, and checkout locking in docs/bash-configuration.md.' >&2 ;;
+    'builder readiness')
+      echo 'Next: check Docker access, the selected context/host, Buildx installation, and builder availability; see docs/release-process.md#troubleshooting.' >&2 ;;
+    'platform readiness')
+      echo 'Next: select native nodes or ask an administrator to prepare emulation for linux/amd64 and linux/arm64; see docs/platform-preparation.md. No privileged setup runs automatically.' >&2 ;;
+    'source verification'|'release notes validation'|'source snapshot')
+      echo 'Next: check clean main, effective Git remotes, already-pushed source, committed notes, and snapshot inputs; see docs/bash-configuration.md.' >&2 ;;
+    'credential preparation'|'registry login')
+      echo 'Next: check private token ownership/mode, account permissions, and independent Git authentication; see docs/bash-configuration.md#credentials-and-prerequisites.' >&2 ;;
+    'Docker connection selection')
+      echo 'Next: check the selected Docker context/host and its TLS metadata; see docs/bash-configuration.md#credentials-and-prerequisites.' >&2 ;;
+    'staging build and immutable verification')
+      echo 'Next: check Dockerfile/application build prerequisites for both platforms and registry push access; see docs/release-process.md#troubleshooting.' >&2 ;;
+    *)
+      echo 'Next: check Git/Gitea/registry connectivity, DNS, HTTPS trust, account permissions, and exact identity evidence; see docs/release-process.md#troubleshooting.' >&2 ;;
+  esac
+  if [[ "${publication_state:-none}" == possible ]]; then
+    echo 'Publication incomplete/uncertain: inspect exact remaining objects without rollback; follow docs/bash-publication.md#retry-states. Do not blindly retry, delete, rewrite tags, or reassign packages.' >&2
+  else
+    echo 'No publication writes were sent by this invocation; existing remote state may still need inspection. Follow docs/bash-publication.md#retry-states before retrying.' >&2
+  fi
+}
+stop() { echo "Release stopped (${phase:-local setup}): $*" >&2; recovery; exit 1; }
+unexpected_failure() {
+  local status=$?
+  # The parent reports failed command substitutions; do not duplicate their diagnostics.
+  if [[ $BASH_SUBSHELL == 0 ]]; then
+    printf 'Release stopped (%s): operation failed\n' "${phase:-local setup}" >&2
+    recovery
+  fi
+  return "$status"
+}
+interrupted() {
+  printf 'Release stopped (%s): operation interrupted\n' "${phase:-local setup}" >&2
+  recovery
+  exit "$1"
+}
 run() { data run "$1" "$2" "$work/command.out" "${@:3}"; }
 login() {
+  stage 'registry login'
   data run-input 1048576 60 "$work/login.out" "$work/token" docker login "$registry_host" \
     --username "$(cat "$work/login")" --password-stdin
 }
@@ -56,9 +98,11 @@ publication_guard() {
 }
 associate_package() {
   local expected_oid=$1
-  phase='package association'
+  stage 'package association'
   publication_guard "$expected_oid"
+  publication_state=possible
   data package-ensure "$root" "$work" || stop 'Package association failed or uncertain'
+  stage 'final association verification'
   publication_guard "$expected_oid"
   data package-check "$root" "$work" || stop 'Cannot verify final package association'
 }

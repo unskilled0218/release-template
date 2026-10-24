@@ -6,6 +6,8 @@ import json
 import os
 from pathlib import Path
 import shutil
+import selectors
+import signal
 import subprocess
 import sys
 import tempfile
@@ -138,6 +140,141 @@ class BashPublicationTests(unittest.TestCase):
 
   def assert_no_writes(self):
     self.assertFalse(set(self.events()) & {"build", "tag-push", "promote", "release-post", "package-link"}, self.events())
+
+  def assert_progress_order(self, result, messages):
+    position = -1
+    for message in messages:
+      current = result.stderr.find("Release progress: " + message, position + 1)
+      self.assertGreater(current, position, message + "\n" + result.stderr)
+      position = current
+    self.assertNotIn("Release progress:", result.stdout)
+
+  def test_progress_is_visible_while_build_is_blocked(self):
+    self.change(build_barrier=True)
+    descriptors = []
+    for name in ("build-entered", "build-release"):
+      os.mkfifo(self.base / name)
+      descriptors.append(os.open(self.base / name, os.O_RDWR | os.O_NONBLOCK))
+    entered, release = descriptors
+    process = subprocess.Popen(["bash", str(self.root / "scripts/release.sh")], cwd=self.base,
+                               env=self.environment, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                               start_new_session=True)
+    def cleanup():
+      os.write(release, b"1")
+      if process.poll() is None:
+        process.terminate()
+      try:
+        process.communicate(timeout=10)
+      except subprocess.TimeoutExpired:
+        os.killpg(process.pid, signal.SIGKILL)
+        process.communicate(timeout=10)
+      finally:
+        for descriptor in descriptors:
+          os.close(descriptor)
+    self.addCleanup(cleanup)
+    output = {"stdout": bytearray(), "stderr": bytearray(), "entered": bytearray()}
+    start = b"starting multi-platform build; staging may be pushed during this operation"
+    with selectors.DefaultSelector() as selector:
+      for stream, name in ((process.stdout, "stdout"), (process.stderr, "stderr"), (entered, "entered")):
+        os.set_blocking(stream if isinstance(stream, int) else stream.fileno(), False)
+        selector.register(stream, selectors.EVENT_READ, name)
+      deadline = time.monotonic() + 45
+      while not (output["entered"] and start in output["stderr"]):
+        self.assertLess(time.monotonic(), deadline, "Build entry/progress was not observed before timeout")
+        self.assertIsNone(process.poll(), bytes(output["stderr"]).decode())
+        for key, _ in selector.select(min(1, max(0, deadline - time.monotonic()))):
+          chunk = os.read(key.fd, 65536)
+          if chunk:
+            output[key.data].extend(chunk)
+          else:
+            selector.unregister(key.fileobj)
+      # Drain messages already available while the fixture cannot finish the build.
+      while ready := selector.select(0):
+        self.assertLess(time.monotonic(), deadline, "Progress pipes did not drain before timeout")
+        for key, _ in ready:
+          chunk = os.read(key.fd, 65536)
+          if chunk:
+            output[key.data].extend(chunk)
+          else:
+            selector.unregister(key.fileobj)
+    self.assertIsNone(process.poll())
+    during = bytes(output["stdout"] + output["stderr"])
+    self.assertNotIn(b"staging build and immutable verification complete", during)
+    self.assertNotIn(b"Publication verified", during)
+    self.assertNotIn("build-barrier-released", self.events())
+    os.write(release, b"1")
+    stdout, stderr = process.communicate(timeout=45)
+    stdout, stderr = bytes(output["stdout"]) + stdout, bytes(output["stderr"]) + stderr
+    self.assertEqual(process.returncode, 0, stderr.decode())
+    self.assertIn(b"staging build and immutable verification complete", stderr)
+    self.assertIn(b"Publication verified: v1.0.0", stdout)
+    self.assertNotIn(b"SENTINEL_PRIVATE_TOKEN", stdout + stderr)
+    self.assertEqual(list(self.base.glob("bash-release.*")), [])
+
+  def test_missing_prerequisites_give_install_instructions_without_commands(self):
+    original = self.environment["PATH"]
+    tools = ("python3", "git", "docker", "curl")
+    try:
+      for missing in tools:
+        with self.subTest(tool=missing):
+          isolated = self.base / ("without-" + missing)
+          isolated.mkdir()
+          for tool in ("bash", "dirname", *tools):
+            if tool != missing:
+              target = self.bin / tool if tool in ("git", "docker", "curl") else Path(shutil.which(tool))
+              (isolated / tool).symlink_to(target)
+          self.environment["PATH"] = str(isolated)
+          result = self.release()
+          self.assertNotEqual(result.returncode, 0)
+          self.assertIn("Install " + ("Python 3.11" if missing == "python3" else missing), result.stderr)
+          self.assertEqual(self.events(), [])
+          self.assertFalse((self.root / ".template-operation.lock").exists())
+    finally:
+      self.environment["PATH"] = original
+
+  def test_readiness_failures_give_stage_guidance_without_writes(self):
+    cases = (("builder_failure", "builder readiness", "Buildx installation"),
+             ("unsupported", "platform readiness", "docs/platform-preparation.md"),
+             ("wrong_main", "source verification", "already-pushed source"),
+             ("http_transport_failure", "read-only startup classification", "DNS"))
+    for flag, phase, advice in cases:
+      with self.subTest(fault=flag):
+        self.change(**{flag: True}, hostile_output=True)
+        result = self.release()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("Release stopped (" + phase + ")", result.stderr)
+        self.assertIn(advice, result.stderr)
+        self.assertIn("No publication writes were sent by this invocation", result.stderr)
+        self.assertNotIn("HOSTILE_REMOTE_OUTPUT", result.stdout + result.stderr)
+        self.assertNotIn(str(self.token), result.stdout + result.stderr)
+        self.assert_no_writes()
+        if flag == "builder_failure":
+          self.assertNotIn("prepare emulation", result.stderr)
+        self.change(**{flag: False})
+
+  def test_credential_failure_explains_private_token_setup(self):
+    self.token.chmod(0o644)
+    result = self.release()
+    self.assertNotEqual(result.returncode, 0)
+    self.assertIn("Release stopped (credential preparation)", result.stderr)
+    self.assertIn("private token ownership/mode", result.stderr)
+    self.assertNotIn(str(self.token), result.stdout + result.stderr)
+    self.assert_no_writes()
+
+  def test_failed_build_warns_of_possible_staging_write_without_later_writes(self):
+    self.change(build_failure=True, hostile_output=True)
+    result = self.release()
+    self.assertNotEqual(result.returncode, 0)
+    self.assertIn("Release stopped (staging build and immutable verification)", result.stderr)
+    self.assertIn("registry push access", result.stderr)
+    self.assertIn("inspect exact remaining objects without rollback", result.stderr)
+    self.assertNotIn("No publication writes were sent", result.stderr)
+    self.assertNotIn("HOSTILE_REMOTE_OUTPUT", result.stdout + result.stderr)
+    self.assertNotIn(str(self.token), result.stdout + result.stderr)
+    self.assertNotIn("staging build and immutable verification complete", result.stderr)
+    self.assertNotIn("Publication verified", result.stdout + result.stderr)
+    self.assertEqual(self.events().count("build"), 1)
+    self.assertFalse(set(self.events()) & {"tag-push", "promote", "release-post", "package-link"})
 
   def predecessor(self):
     data = helper_module()
@@ -277,6 +414,7 @@ class BashPublicationTests(unittest.TestCase):
     self.assertIn("promotion-read-injected:prepared", self.events())
     self.assertNotIn("promote", self.events())
     self.assertEqual(self.events().count("release-post"), 1)
+    self.assertIn("latest already matches the prepared digest; skipping promotion", result.stderr)
 
   def test_confirmed_tag_disappearance_stops_before_promotion(self):
     self.assert_tag_change_refuses("before_promotion")
@@ -360,9 +498,18 @@ class BashPublicationTests(unittest.TestCase):
     self.assert_no_writes()
 
   def test_publish_and_completed_retry_ignore_missing_or_foreign_staging(self):
+    self.change(hostile_output=True)
     result = self.release()
     self.assertEqual(result.returncode, 0, result.stderr)
     self.assertIn("Publication verified: v1.0.0", result.stdout)
+    self.assertNotIn("HOSTILE_REMOTE_OUTPUT", result.stdout + result.stderr)
+    self.assertNotIn(str(self.token), result.stdout + result.stderr)
+    self.assert_progress_order(result, ("prerequisite checks", "builder readiness", "platform readiness",
+      "source verification", "credential preparation", "read-only startup classification", "staging lookup",
+      "registry login", "starting multi-platform build", "staging build and immutable verification complete",
+      "tag publication", "digest promotion", "release creation", "final publication verification",
+      "package association", "final association verification"))
+    self.assertEqual(result.stderr.count("Release progress: prerequisite checks"), 1)
     for action in ("build", "tag-push", "promote", "release-post"):
       self.assertEqual(self.events().count(action), 1, action)
     state = self.state()
@@ -374,6 +521,12 @@ class BashPublicationTests(unittest.TestCase):
       (self.base / "events").write_text("")
       result = self.release()
       self.assertEqual(result.returncode, 0, result.stderr)
+      self.assert_progress_order(result, ("completed-publication verification", "package association",
+        "final association verification"))
+      self.assertNotIn("HOSTILE_REMOTE_OUTPUT", result.stdout + result.stderr)
+      self.assertNotIn(str(self.token), result.stdout + result.stderr)
+      for message in ("starting multi-platform build", "digest promotion", "release creation", "staging lookup"):
+        self.assertNotIn("Release progress: " + message, result.stderr)
       self.assert_no_writes()
       self.assertFalse(any(e.startswith("registry:rt-") for e in self.events()))
       self.assertEqual(self.git("ls-remote", "--tags", "origin", "refs/tags/v1.0.0").split()[0], oid)
@@ -383,6 +536,10 @@ class BashPublicationTests(unittest.TestCase):
     result = self.release()
     self.assertNotEqual(result.returncode, 0)
     self.assertIn("Release creation not confirmed", result.stderr)
+    self.assertIn("inspect exact remaining objects without rollback", result.stderr)
+    self.assertIn("Do not blindly retry", result.stderr)
+    self.assertTrue(self.state()["aliases"].get("latest"))
+    self.assertEqual(self.events().count("tag-push"), 1)
     (self.base / "events").write_text("")
     self.change(fail_release=False)
     result = self.release()
@@ -407,11 +564,17 @@ class BashPublicationTests(unittest.TestCase):
 
   def test_unbound_interrupted_build_reuses_verified_staging(self):
     self.change(lose_build=True)
-    self.assertNotEqual(self.release().returncode, 0)
+    failed = self.release()
+    self.assertNotEqual(failed.returncode, 0)
+    self.assertIn("inspect exact remaining objects without rollback", failed.stderr)
+    self.assertTrue(any(name.startswith("rt-") for name in self.state()["aliases"]))
     self.change(lose_build=False)
     result = self.release()
     self.assertEqual(result.returncode, 0, result.stderr)
     self.assertEqual(self.events().count("build"), 1)
+    self.assert_progress_order(result, ("staging lookup", "reusing verified staging image", "registry login",
+      "tag publication", "digest promotion", "release creation"))
+    self.assertNotIn("starting multi-platform build", result.stderr)
 
   def test_preflight_refusals_do_not_write(self):
     for flag in ("wrong_remote", "wrong_main", "unsupported", "null_inventory", "malformed", "oversized", "realm_foreign"):
@@ -422,7 +585,11 @@ class BashPublicationTests(unittest.TestCase):
         self.change(**{flag: False})
     for status in (401, 500):
       self.change(status=status)
-      self.assertNotEqual(self.release().returncode, 0)
+      result = self.release()
+      self.assertNotEqual(result.returncode, 0)
+      self.assertIn("Release stopped (read-only startup classification)", result.stderr)
+      self.assertIn("account permissions", result.stderr)
+      self.assertIn("No publication writes were sent by this invocation", result.stderr)
       self.assert_no_writes()
     self.change(status=None)
 
@@ -439,6 +606,8 @@ class BashPublicationTests(unittest.TestCase):
     result = self.release("--validate")
     self.assertEqual(result.returncode, 0, result.stderr)
     self.assertEqual(self.events(), [])
+    self.assertNotIn("Release progress:", result.stdout + result.stderr)
+    self.assertFalse((self.root / ".template-operation.lock").exists())
     path = self.root / "scripts/release.json"
     original = path.read_text()
     for text in (original[:-1] + ',"schema":1}', original[:-1] + ',"extra":true}', '{"schema":null}', '{'):
@@ -554,6 +723,9 @@ class BashPublicationTests(unittest.TestCase):
     self.assertNotEqual(result.returncode, 0)
     self.assertEqual(self.events().count("build"), 1)
     self.assertFalse(set(self.events()) & {"tag-push", "promote", "release-post"})
+    self.assertNotIn("staging build and immutable verification complete", result.stderr)
+    self.assertNotIn("Publication verified", result.stdout + result.stderr)
+    self.assertIn("inspect exact remaining objects without rollback", result.stderr)
 
   def test_completed_missing_bound_content_or_final_alias_never_repairs(self):
     result = self.release()
@@ -654,6 +826,8 @@ class BashPublicationTests(unittest.TestCase):
       process.terminate()
       stdout, stderr = process.communicate(timeout=10)
       self.assertNotEqual(process.returncode, 0)
+      self.assertIn("operation interrupted", stderr)
+      self.assertIn("inspect exact remaining objects without rollback", stderr)
       self.assertNotIn("SENTINEL_PRIVATE_TOKEN", stdout + stderr)
       self.assertEqual(list(self.base.glob("bash-release.*")), [])
       import fcntl

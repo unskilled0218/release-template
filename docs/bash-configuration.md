@@ -9,6 +9,8 @@
 
 For a newly approved consumer, copy/review `scripts/release.sh`, `scripts/release-common.sh`, `scripts/release-data.py`, and `scripts/release.json`. Add your root `Dockerfile`, `.dockerignore`, `VERSION`, and committed Markdown release notes. Ignore `.template-operation.lock`, `.release-template/`, and `.template-transaction/`. Commit the complete setup and push its clean `main` before publication. No managed installation or network self-update runs during release.
 
+Follow the [release process](release-process.md) for the ordered readiness checklist, progress expectations, and troubleshooting. Tool availability is checked before builder access; `--validate` does not prove server connectivity or publication permissions.
+
 The sample root Dockerfile runs Ubuntu's `echo "Hello World"`. It is not your application's Dockerfile. This repository explicitly configures `dev/container-release-template` and `git.lan/dev/container-release-template-hello`; do not publish a copied template until you have changed its target settings and Git remote.
 
 ## Settings

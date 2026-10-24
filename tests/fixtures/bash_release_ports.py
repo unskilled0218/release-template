@@ -5,6 +5,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import select
 import subprocess
 import sys
 import time
@@ -16,6 +17,9 @@ state_path = base / "state.json"
 state = json.loads(state_path.read_text())
 arguments = sys.argv[1:]
 tool = Path(sys.argv[0]).name
+
+if state.get("hostile_output"):
+  print("HOSTILE_REMOTE_OUTPUT SENTINEL_PRIVATE_TOKEN " + str(base / "token"), file=sys.stderr)
 
 
 def save():
@@ -125,6 +129,8 @@ if tool == "docker":
     output.write(json.dumps(selection) + "\n")
   if arguments[:2] == ["buildx", "inspect"]:
     event("builder")
+    if state.get("builder_failure"):
+      sys.exit(1)
     print("Platforms: " + ("linux/amd64" if state.get("unsupported") else "linux/amd64, linux/arm64"))
   elif arguments[:2] == ["context", "show"]:
     print(selection["context"])
@@ -137,6 +143,18 @@ if tool == "docker":
     assert "UNRELATED_AUTH_SENTINEL" not in json.dumps(config)
   elif arguments[:2] == ["buildx", "build"]:
     event("build")
+    if state.get("build_barrier"):
+      with (base / "build-entered").open("wb", buffering=0) as output:
+        output.write(b"entered")
+      descriptor = os.open(base / "build-release", os.O_RDONLY | os.O_NONBLOCK)
+      try:
+        assert select.select([descriptor], [], [], 30)[0], "Build barrier timed out"
+        assert os.read(descriptor, 1) == b"1", "Build barrier was not released"
+      finally:
+        os.close(descriptor)
+      event("build-barrier-released")
+    if state.get("build_failure"):
+      sys.exit(1)
     if state.get("hang_build"):
       time.sleep(20)
     context = Path(arguments[-1])
@@ -188,6 +206,8 @@ raw_body = None
 target_repository = {"id": 17, "name": "application", "full_name": "fixtures/application", "owner": {"login": "fixtures"}}
 association_resource = None
 event("http:" + method + ":" + route)
+if state.get("http_transport_failure"):
+  sys.exit(7)
 if route == "/api/v1/version" and method == "GET":
   association_resource = "version"
   body = {"version": state.get("gitea_version", "1.25.0")}

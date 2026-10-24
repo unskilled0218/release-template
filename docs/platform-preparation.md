@@ -6,7 +6,9 @@
 
 ## Install AMD64 and ARM64 emulation
 
-Only an authorized host administrator may run these optional preparation commands when the selected hosts need emulation rather than native platform nodes:
+Only an authorized host administrator may run the optional preparation commands below when the selected hosts need emulation rather than native platform nodes.
+
+Check installed tools and Docker/builder connectivity first using the [release process](release-process.md#check-platform-readiness). Missing platform advertising and an inaccessible builder are different failures; privileged emulation setup is not a generic connectivity fix.
 
 ```sh
 docker run --privileged --rm tonistiigi/binfmt --install amd64,arm64
