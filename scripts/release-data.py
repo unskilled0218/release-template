@@ -242,8 +242,11 @@ def source(root, expected=None, remote=True):
   for ignored in (".template-operation.lock", ".release-template/probe"):
     git(root, "check-ignore", "--quiet", ignored)
   origin = urlsplit(config["gitea"])
-  for arguments in (("remote", "get-url", "origin"), ("remote", "get-url", "--push", "origin")):
-    destination = git(root, *arguments).decode().strip()
+  for arguments in (("remote", "get-url", "origin"), ("remote", "get-url", "--push", "--all", "origin")):
+    destinations = git(root, *arguments).decode().removesuffix("\n").split("\n")
+    require(len(destinations) == 1 and destinations[0] and not re.search(r"[\x00-\x20\x7f]", destinations[0]),
+            "Require one valid effective Git destination")
+    destination = destinations[0]
     ssh = destination.startswith("ssh://") or re.fullmatch(r"[^/@:]+@[^/:]+:[^\s]+", destination)
     host = origin.hostname.lower()
     if not ssh and origin.port not in (None, 443):

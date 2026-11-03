@@ -149,6 +149,160 @@ class BashPublicationTests(unittest.TestCase):
       position = current
     self.assertNotIn("Release progress:", result.stdout)
 
+  def real_source_environment(self):
+    environment = {key: value for key, value in self.environment.items() if not key.startswith("GIT_CONFIG")}
+    return environment | {"PATH": "/usr/bin:/bin", "GIT_CONFIG_NOSYSTEM": "1", "GIT_CONFIG_GLOBAL": "/dev/null"}
+
+  def real_source(self):
+    with patch.dict(os.environ, self.real_source_environment(), clear=True):
+      return helper_module().source(self.root, remote=False)
+
+  def test_real_git_push_fanout_is_refused(self):
+    allowed = "https://git.lan/fixtures/application.git"
+    original = (self.root / ".git/config").read_text()
+    for key in ("url", "pushurl"):
+      for extra in (allowed, "https://foreign.invalid/other/project.git"):
+        with self.subTest(key=key, extra=extra):
+          (self.root / ".git/config").write_text(original)
+          self.git("remote", "set-url", "origin", allowed)
+          if key == "pushurl":
+            self.git("config", "--add", "remote.origin.pushurl", allowed)
+          self.git("config", "--add", "remote.origin." + key, extra)
+          with patch.dict(os.environ, self.real_source_environment(), clear=True):
+            data = helper_module()
+            observed = data.git(self.root, "remote", "get-url", "--push", "--all", "origin").decode().splitlines()
+            self.assertEqual(observed, [allowed, extra])
+            with self.assertRaisesRegex(data.Refusal, "one valid effective Git destination"):
+              data.source(self.root, remote=False)
+
+  def test_real_git_single_push_targets_keep_supported_normalization(self):
+    original = (self.root / ".git/config").read_text()
+    for destination in ("https://git.lan/fixtures/application.git", "https://git.lan:443/fixtures/application",
+                        "git@git.lan:fixtures/application.git", "ssh://git@git.lan:2222/fixtures/application.git"):
+      for explicit in (False, True):
+        with self.subTest(destination=destination, explicit=explicit):
+          (self.root / ".git/config").write_text(original)
+          self.git("remote", "set-url", "origin", destination)
+          if explicit:
+            self.git("config", "--add", "remote.origin.pushurl", destination)
+          self.assertEqual(self.real_source(), self.git("rev-parse", "HEAD"))
+
+  def test_real_git_destination_rewrites_are_validated(self):
+    allowed = "https://git.lan/fixtures/application.git"
+    original = (self.root / ".git/config").read_text()
+    for rule in ("insteadOf", "pushInsteadOf"):
+      for target in (allowed, "https://foreign.invalid/other/project.git"):
+        with self.subTest(rule=rule, target=target):
+          (self.root / ".git/config").write_text(original)
+          # A push-only rewrite leaves the permitted fetch URL unchanged.
+          raw = "fixture:application" if rule == "insteadOf" else allowed
+          self.git("remote", "set-url", "origin", raw)
+          self.git("config", "url." + target + "." + rule, raw)
+          with patch.dict(os.environ, self.real_source_environment(), clear=True):
+            data = helper_module()
+            self.assertEqual(data.git(self.root, "remote", "get-url", "--push", "--all", "origin").decode().strip(), target)
+            if target == allowed:
+              self.assertEqual(data.source(self.root, remote=False), self.git("rev-parse", "HEAD"))
+            else:
+              with self.assertRaisesRegex(data.Refusal, "Git destination differs"):
+                data.source(self.root, remote=False)
+
+  def test_push_url_evidence_refuses_before_publication(self):
+    allowed = "https://git.lan/fixtures/application.git\n"
+    cases = ({"push_url_output": allowed + "https://foreign.invalid/other/project.git\n"},
+             {"push_url_output": allowed * 2}, {"push_url_output": ""},
+             {"push_url_output": "\n"}, {"push_url_output": allowed + "\n"},
+             {"push_url_output": allowed.replace("\n", "\r\n")},
+             {"push_url_output": allowed.replace("application", "app\x00lication")},
+             {"push_url_output": "https://foreign.invalid/other/project.git\n"},
+             *({"push_url_fault": fault} for fault in ("command", "overflow", "encoding")))
+    before = self.git("ls-remote", "origin")
+    for case in cases:
+      with self.subTest(case=case):
+        self.change(**({"push_url_output": allowed, "push_url_fault": None} | case))
+        result = self.release()
+        self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("push-urls-read", self.events())
+        self.assertIn("Release stopped (source verification)", result.stderr)
+        self.assertNotIn("Publication verified", result.stdout)
+        self.assertNotIn("foreign.invalid", result.stdout + result.stderr)
+        self.assert_no_writes()
+        self.assertEqual(self.git("ls-remote", "origin"), before)
+        self.assertEqual(self.state()["objects"], {})
+
+  def test_push_urls_changed_after_build_block_tag_dispatch(self):
+    self.change(push_urls_change_after_build=True)
+    result = self.release()
+    events = self.events()
+    self.assertIn("push-urls-changed", events)
+    self.assertLess(events.index("build"), events.index("push-urls-changed"))
+    self.assertNotEqual(result.returncode, 0)
+    self.assertNotIn("Publication verified", result.stdout)
+    self.assertEqual(events.count("build"), 1)
+    self.assertFalse(set(events) & {"tag-push", "promote", "release-post", "package-link"})
+    self.assertEqual(self.git("ls-remote", "--tags", "origin"), "")
+    self.assertTrue(any(name.startswith("rt-") for name in self.state()["aliases"]))
+    self.assertIn(self.state()["prepared"], self.state()["objects"])
+
+  def assert_post_confirmation_refusal(self, fault, skip=False, lost=False):
+    predecessor = self.predecessor()
+    self.change(post_confirmation_fault=fault, post_confirmation_predecessor=predecessor,
+                promotion_read_fault="prepared" if skip else None, lose_promotion=lost)
+    result = self.release()
+    events = self.events()
+    injection = "post-confirmation-injected:" + fault
+    self.assertIn(injection, events)
+    self.assertLess(events.index("promotion-confirmation-read"), events.index(injection))
+    self.assertIn("digest promotion verified", result.stderr)
+    self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+    self.assertNotIn("Publication verified", result.stdout)
+    self.assertFalse(set(events[events.index(injection) + 1:]) & {"build", "tag-push", "promote", "release-post", "package-link"})
+    for action, count in (("build", 1), ("tag-push", 1), ("promote", int(not skip)), ("release-post", 0), ("package-link", 0)):
+      self.assertEqual(events.count(action), count, action)
+    state = self.state()
+    latest = state["aliases"].get("latest")
+    if fault == "predecessor":
+      self.assertEqual(latest, predecessor)
+    elif fault == "absent":
+      self.assertIsNone(latest)
+    elif fault == "foreign":
+      self.assertNotIn(latest, (predecessor, state["prepared"]))
+    else:
+      self.assertEqual(latest, state["prepared"])
+    self.assertEqual(state["releases"], [])
+    self.assertTrue(any(name.startswith("rt-") and value == state["prepared"] for name, value in state["aliases"].items()))
+    self.assertIn(state["prepared"], state["objects"])
+    oid = self.git("ls-remote", "--tags", "origin", "refs/tags/v1.0.0").split()[0]
+    self.assertEqual(oid, state["confirmed_object"])
+    identity = json.loads(self.git("cat-file", "tag", oid).split("\n\n", 1)[1].split("\n", 1)[1])
+    self.assertEqual(identity["digest"], state["prepared"])
+    self.assertEqual(identity["predecessor"], predecessor)
+    self.assertEqual(identity["commit"], self.git("rev-parse", "HEAD"))
+
+  def test_post_confirmation_predecessor_reversion_blocks_release(self):
+    self.assert_post_confirmation_refusal("predecessor")
+
+  def test_post_confirmation_absence_blocks_release(self):
+    self.assert_post_confirmation_refusal("absent")
+
+  def test_post_confirmation_foreign_alias_blocks_release(self):
+    self.assert_post_confirmation_refusal("foreign")
+
+  def test_post_confirmation_failed_read_blocks_release(self):
+    self.assert_post_confirmation_refusal("transport")
+
+  def test_post_confirmation_malformed_read_blocks_release(self):
+    self.assert_post_confirmation_refusal("malformed")
+
+  def test_post_confirmation_oversized_read_blocks_release(self):
+    self.assert_post_confirmation_refusal("overflow")
+
+  def test_skipped_promotion_confirmation_reversion_blocks_release(self):
+    self.assert_post_confirmation_refusal("predecessor", skip=True)
+
+  def test_reconciled_promotion_confirmation_reversion_blocks_release(self):
+    self.assert_post_confirmation_refusal("predecessor", lost=True)
+
   def test_progress_is_visible_while_build_is_blocked(self):
     self.change(build_barrier=True)
     descriptors = []
@@ -1226,7 +1380,7 @@ class BashDataTests(unittest.TestCase):
   def test_guard_read_failures_remain_fatal_in_conditional_callers(self):
     script = '''set -Eeuo pipefail
 source "$1"
-root=unused work=unused commit=unused predecessor='' prepared=digest
+root=unused work=unused commit=unused predecessor='' prepared=digest promotion_confirmed=false
 fault_status=$3
 data() { return "$fault_status"; }
 if "$2"; then echo continued; fi
@@ -1241,6 +1395,25 @@ if "$2"; then echo continued; fi
           self.assertNotEqual(result.returncode, 0)
           self.assertIn(message, result.stderr)
           self.assertNotIn("continued", result.stdout)
+
+  def test_alias_guard_confirmation_and_failures_in_conditional_callers(self):
+    script = '''set -Eeuo pipefail
+source "$1"
+root=unused work=unused predecessor=old prepared=new
+if [[ "$2" != unset ]]; then promotion_confirmed=$2; fi
+observed=$3 status=$4
+data() { printf '%s\\n' "$observed"; return "$status"; }
+if alias_guard; then echo continued; fi
+'''
+    for phase in ("false", "true", "unset"):
+      for observed in ("old", "new", "", "foreign"):
+        for status in (0, 1, 2):
+          with self.subTest(phase=phase, observed=observed, status=status):
+            result = subprocess.run(["bash", "-c", script, "fixture", str(ROOT / "scripts/release-common.sh"), phase, observed, str(status)],
+                                    capture_output=True, text=True)
+            accepted = status == 0 and (observed == "new" or (phase != "true" and observed == "old"))
+            self.assertEqual(result.returncode == 0, accepted, result.stdout + result.stderr)
+            self.assertEqual("continued" in result.stdout, accepted)
 
   def test_bounded_capture_exact_limit_and_overflow(self):
     output = self.data.command([sys.executable, "-c", "import sys; sys.stdout.buffer.write(b'x'*64)"], 64)

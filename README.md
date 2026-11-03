@@ -4,7 +4,7 @@
   - [Use](#use)
   - [Development](#development)
 
-Version 0.6.1 builds and publishes one AMD64/ARM64 container image, then links its package to the configured Gitea repository for the Packages tab. Python's standard library handles strict data and bounded I/O; no jq, Node, or Python packages are needed. See [release notes](docs/releases/0.6.1.md).
+Version 0.6.2 builds and publishes one AMD64/ARM64 container image, then links its package to the configured Gitea repository for the Packages tab. It requires one effective Git push endpoint and rejects observed changes to a confirmed final image alias before release creation. Python's standard library handles strict data and bounded I/O; no jq, Node, or Python packages are needed. See [release notes](docs/releases/0.6.2.md).
 
 ## Use
 
@@ -17,7 +17,7 @@ Review [configuration and credentials](docs/bash-configuration.md) once, set you
 
 Run publication only from clean, already-pushed `main`, with Git authentication, trusted HTTPS, and a Buildx builder advertising both platforms. Follow the [release process and troubleshooting checklist](docs/release-process.md). New package links require stable Gitea 1.25.x or exact stable 28.2.0. The command publishes real Git/image/release/package-link changes. Read [publication and partial failures](docs/bash-publication.md) first, including exclusive package-writer requirements. It never deletes images, reassigns packages, or performs retention cleanup.
 
-Only the Bash workflow is supported in this checkout. Historical transactions require their preserved original checkout/pin; no migration or managed updater is provided. Verification is local only. Two [known publication warnings](docs/bash-publication.md#known-limits) remain unresolved.
+Only the Bash workflow is supported in this checkout. Historical transactions require their preserved original checkout/pin; no migration or managed updater is provided. Verification is local only. The [Buildx discovery warning and other known limits](docs/bash-publication.md#known-limits) remain unresolved.
 
 ## Development
 

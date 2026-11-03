@@ -71,7 +71,11 @@ tag_state() {
 alias_guard() {
   local current
   current=$(data resolve "$root" "$work" latest) || stop 'Cannot verify latest alias'
-  [[ "$current" == "$predecessor" || "$current" == "$prepared" ]] || stop 'Latest changed since preparation'
+  if [[ "${promotion_confirmed:-false}" == true ]]; then
+    [[ "$current" == "$prepared" ]] || stop 'Confirmed latest disappeared or changed'
+  else
+    [[ "$current" == "$predecessor" || "$current" == "$prepared" ]] || stop 'Latest changed since preparation'
+  fi
 }
 fresh_guard() {
   scan

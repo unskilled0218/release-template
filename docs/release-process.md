@@ -14,7 +14,7 @@
 
 1. Follow [configuration and credentials](bash-configuration.md) when copying this template. Replace its sample Dockerfile, repository/image targets, Git remote, and account settings before running publication. No other project is updated automatically.
 2. Run your application's tests separately. Set root `VERSION` and prepare the configured committed release notes with the matching heading. Commit all release inputs and push clean `main` to the configured repository; the release command does not push source.
-3. Arrange exclusive publication and package-association access through completion, including other checkouts, UI actions, and in-flight requests. The checkout lock alone does not exclude those writers.
+3. Arrange exclusive publication and package-association access through completion, including other checkouts, UI actions, and in-flight requests. Keep checkout Git configuration unchanged as well. The checkout lock alone does not exclude those writers or configuration edits.
 
 ## Check prerequisites
 
@@ -47,7 +47,7 @@ Advertised platforms do not prove that your application's Dockerfile compiles on
 Run `./scripts/release.sh` only when ready to publish. There is no separate network-only preflight mode. Existing bounded reads establish the following evidence before the fresh build:
 
 - Docker: selected builder inspection/bootstrap and context selection establish builder access and advertised platforms, not application build success.
-- Git: effective fetch/push destinations must match the configured target; `git ls-remote` must show remote `main` at the captured source commit. Independent Git authentication must work.
+- Git: the first effective fetch URL and exactly one effective push URL must match the configured target; enumeration includes URL rewrites and fallback URLs. Multiple push entries, including duplicates, are refused. `git ls-remote` must show remote `main` at the captured source commit. Independent Git authentication must work.
 - Gitea: complete authenticated tag/release inventories classify the requested version before staging lookup or publication writes. Failed, malformed, oversized, or incomplete evidence stops the command.
 - Registry: predecessor and staging manifest reads verify registry access and matching evidence. Login precedes a fresh build or staging reuse; read access and login do not prove that a later push will be authorized.
 
@@ -63,6 +63,8 @@ For a fresh version, the command reuses verified staging evidence or builds both
 
 After immutable image and build-metadata verification, the command publishes the exact annotated Git tag, promotes the verified digest to `latest` without rebuilding, creates the notes-only Gitea release, verifies publication, associates the configured package, and rechecks publication and association. See [publication sequence and recovery](bash-publication.md) for exact guards, retry classifications, and resource limits. There is no automatic image deletion, retention, rollback, package reassignment, or host setup.
 
+Once a successful read confirms `latest` at the prepared digest, later fresh guards require that digest exactly, even if the promotion write was skipped or its response was lost. An observed reversion to the original predecessor is no longer eligible for release creation. Refusal preserves accepted tag/image state without repromotion or repair.
+
 Completed matching publications take a verification path with no build, staging lookup, promotion, tag push, or release POST. Only a missing package association may be completed under the existing scoped rules. Tag-only/release-only startup states stop for inspection instead of automatic repair.
 
 ## Progress and verification
@@ -73,7 +75,7 @@ These are milestone logs, not live Docker build output, continuous heartbeats, o
 
 Failures print fixed stage-specific next steps. Before publication writes, messages say that this invocation sent none, while noting that older remote state may still exist. After a possible staging/publication write, they warn that publication may be incomplete or uncertain and direct you to inspect exact remaining objects without rollback.
 
-Changes to release scripts alter annotation-bound script identity. Keep the original checkout/pin for historical retries; changed scripts cannot adopt publications bound to an older script hash. Passing local tests is not live publication approval. The [known publication warnings](bash-publication.md#known-limits) remain unresolved.
+Changes to release scripts alter annotation-bound script identity. Keep the original checkout/pin for historical retries; changed scripts cannot adopt publications bound to an older script hash. Passing local tests is not live publication approval. The [Buildx discovery warning and other known limits](bash-publication.md#known-limits) remain unresolved.
 
 ## Troubleshooting
 

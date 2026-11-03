@@ -11,6 +11,8 @@ For a newly approved consumer, copy/review `scripts/release.sh`, `scripts/releas
 
 Follow the [release process](release-process.md) for the ordered readiness checklist, progress expectations, and troubleshooting. Tool availability is checked before builder access; `--validate` does not prove server connectivity or publication permissions.
 
+Git must resolve `origin` to exactly one effective push URL matching the configured host/repository. The command enumerates `git remote get-url --push --all origin`, including Git's URL rewriting and fallback to ordinary URLs when no push URL exists. Multiple entries, including duplicates or several matching endpoints, are unsupported and refused before publication. The first effective fetch URL must also match the target. Keep checkout configuration unchanged and publication writers excluded through completion; repeated reads are not an atomic lock on Git configuration. Local `--validate` does not inspect remotes.
+
 The sample root Dockerfile runs Ubuntu's `echo "Hello World"`. It is not your application's Dockerfile. This repository explicitly configures `dev/container-release-template` and `git.lan/dev/container-release-template-hello`; do not publish a copied template until you have changed its target settings and Git remote.
 
 ## Settings

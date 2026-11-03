@@ -70,6 +70,28 @@ def docker_selection():
 
 if tool == "git":
   if "remote" in arguments and "get-url" in arguments:
+    if "--push" in arguments:
+      if state.get("push_urls_change_after_build") and state.get("prepared"):
+        state.pop("push_urls_change_after_build")
+        state["push_url_output"] = "https://git.lan/fixtures/application.git\nhttps://foreign.invalid/other/project.git\n"
+        event("push-urls-changed")
+        save()
+      if "--all" in arguments:
+        event("push-urls-read")
+        fault = state.get("push_url_fault")
+        if fault == "command":
+          sys.exit(1)
+        if fault == "overflow":
+          sys.stdout.buffer.write(b"x" * 16777217)
+          sys.exit(0)
+        if fault == "encoding":
+          sys.stdout.buffer.write(b"\xff\n")
+          sys.exit(0)
+      if "push_url_output" in state:
+        value = state["push_url_output"]
+        # Model get-url's first-entry default separately from --all.
+        sys.stdout.write(value if "--all" in arguments else value.split("\n")[0] + "\n")
+        sys.exit(0)
     print("https://git.lan/" + ("foreign/project.git" if state.get("wrong_remote") else "fixtures/application.git"))
     sys.exit(0)
   if "ls-remote" in arguments and "refs/heads/main" in arguments and state.get("wrong_main"):
@@ -184,6 +206,7 @@ if tool == "docker":
   elif arguments[:3] == ["buildx", "imagetools", "create"]:
     event("promote")
     state["aliases"]["latest"] = arguments[-1].split("@", 1)[1]
+    state["promotion_ready"] = True
     if state.get("oversize_after_promotion"):
       state["oversized"] = True
     save()
@@ -273,6 +296,21 @@ elif route.startswith("/v2/"):
         state["aliases"]["latest"] = store({"foreign": True})
       elif fault == "prepared":
         state["aliases"]["latest"] = state["prepared"]
+        state["promotion_ready"] = True
+    save()
+  if reference == "latest" and state.get("promotion_ready") and state.get("post_confirmation_fault") and fault != "prepared":
+    state["confirmation_reads"] = state.get("confirmation_reads", 0) + 1
+    if state["confirmation_reads"] == 1:
+      event("promotion-confirmation-read")
+    elif state["confirmation_reads"] == 2:
+      fault = state.pop("post_confirmation_fault")
+      event("post-confirmation-injected:" + fault)
+      if fault == "predecessor":
+        state["aliases"]["latest"] = state["post_confirmation_predecessor"]
+      elif fault == "absent":
+        state["aliases"].pop("latest", None)
+      elif fault == "foreign":
+        state["aliases"]["latest"] = store({"foreign": True})
     save()
   if fault in ("transport", "timeout"):
     sys.exit(28 if fault == "timeout" else 7)
