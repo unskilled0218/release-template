@@ -8,6 +8,8 @@
 
 Fix F3 and F4 from task 19 code review
 
+update goal: add f5
+
 ## goal
 
-Resolve F3 and F4 from `tasks/_archives/19-code-review/code-review.md`: preserve the selected Buildx executable across private authentication setup, and provide safe, actionable guidance for early lock and temporary-directory failures. Add focused regressions while preserving credential isolation, Docker connection selection, locking, and zero publication writes on early refusal. Leave F5 outside this task.
+Resolve F3, F4, and F5 from `tasks/_archives/19-code-review/code-review.md`: preserve Buildx executable discovery across private authentication setup, provide safe guidance for early lock and temporary-directory failures, and remove the test suite's requirement for a pre-created `/tmp/opencode` directory. Add focused regressions while preserving credential isolation, Docker connection selection, locking, and zero publication writes on early refusal.
