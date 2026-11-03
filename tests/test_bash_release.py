@@ -1,6 +1,7 @@
 """Exercise the Bash entry point without credentials, Docker, or production services."""
 
 import ast
+import errno
 import importlib.util
 import json
 import os
@@ -17,6 +18,10 @@ import time
 
 
 ROOT = Path(__file__).resolve().parents[1]
+
+
+def owned_temporary_directory(prefix="bash-release-test-"):
+  return tempfile.TemporaryDirectory(prefix=prefix, dir="/tmp/opencode" if Path("/tmp/opencode").is_dir() else None)
 
 
 class BashInterfaceTests(unittest.TestCase):
@@ -73,7 +78,7 @@ def helper_module():
 
 class BashPublicationTests(unittest.TestCase):
   def setUp(self):
-    self.temporary = tempfile.TemporaryDirectory(prefix="bash-release-test-", dir="/tmp/opencode" if Path("/tmp/opencode").is_dir() else None)
+    self.temporary = owned_temporary_directory()
     self.addCleanup(self.temporary.cleanup)
     self.base = Path(self.temporary.name)
     self.root, self.bin = self.base / "project", self.base / "bin"
@@ -490,6 +495,150 @@ class BashPublicationTests(unittest.TestCase):
     self.assertEqual({row["builder"] for row in selections}, {expected_builder})
     self.assertEqual({row["tls_verify"] for row in selections}, {self.environment.get("DOCKER_TLS_VERIFY")})
     self.assertEqual({row["cert_path"] for row in selections}, {self.environment.get("DOCKER_CERT_PATH")})
+
+  def plugin_marker(self, directory, identity):
+    directory.mkdir(parents=True, exist_ok=True)
+    path = directory / "docker-buildx"
+    path.write_text("#!/bin/sh\n# " + identity + "\nexit 0\n")
+    path.chmod(0o755)
+    return path
+
+  def test_buildx_discovery_preserves_candidates_across_auth_isolation(self):
+    for mode in ("local", "shadow", "extra", "system", "missing-config", "unset", "empty", "relative", "spaces", "symlink", "null"):
+      with self.subTest(mode=mode):
+        case = BashPublicationTests()
+        try:
+          case.setUp()
+          original = case.connection()
+          local = case.plugin_marker(original / "cli-plugins", "config-local")
+          system = case.plugin_marker(case.base / "system-plugins", "system")
+          expected = local
+          config_path = original / "config.json"
+          config = json.loads(config_path.read_text())
+          if mode == "local":
+            system.unlink()
+          elif mode in ("extra", "relative", "spaces"):
+            first = case.plugin_marker(case.base / "extra plugins", "extra-first")
+            second = case.plugin_marker(case.base / "second-extra", "extra-second")
+            config["cliPluginsExtraDirs"] = [str(first.parent), str(second.parent)]
+            expected = first
+            if mode == "relative":
+              config["cliPluginsExtraDirs"] = [str(first.parent.relative_to(case.base)), str(second.parent.relative_to(case.base))]
+              case.environment["DOCKER_CONFIG"] = str(original.relative_to(case.base))
+            if mode == "spaces":
+              renamed = case.base / "original docker"
+              original.rename(renamed)
+              original, config_path = renamed, renamed / "config.json"
+              case.environment["DOCKER_CONFIG"] = str(renamed)
+          elif mode in ("system", "missing-config"):
+            local.unlink()
+            expected = system
+          elif mode in ("unset", "empty"):
+            original.rename(case.base / ".docker")
+            original = case.base / ".docker"
+            config_path = original / "config.json"
+            expected = original / "cli-plugins/docker-buildx"
+            if mode == "unset":
+              case.environment.pop("DOCKER_CONFIG")
+            else:
+              case.environment["DOCKER_CONFIG"] = ""
+          elif mode == "symlink":
+            backing = case.plugin_marker(case.base / "linked-plugin", "symlink-target")
+            local.unlink()
+            local.symlink_to(backing)
+          elif mode == "null":
+            config["cliPluginsExtraDirs"] = None
+          config_path.write_text(json.dumps(config))
+          if mode == "missing-config":
+            config_path.unlink()
+          case.change(plugin_discovery=True, plugin_system_dirs=[str(system.parent)])
+          result = case.release()
+          self.assertEqual(result.returncode, 0, result.stderr)
+          selections = [json.loads(line) for line in (case.base / "docker-selections").read_text().splitlines()]
+          buildx = [row for row in selections if row["operation"][0] == "buildx"]
+          self.assertEqual(len(buildx), 3)
+          self.assertEqual({row["plugin"] for row in buildx}, {str(expected)})
+          self.assertEqual({row["plugin_identity"] for row in buildx}, {expected.read_text()})
+          private = json.loads((case.base / "private-docker-config.json").read_text())
+          self.assertEqual(set(private), {"auths", "cliPluginsExtraDirs"})
+          self.assertEqual(private["cliPluginsExtraDirs"][-1], str(original / "cli-plugins"))
+          self.assertNotIn("UNRELATED_AUTH_SENTINEL", json.dumps(private))
+          if mode != "missing-config":
+            case.assert_connection_preserved("unix:///var/run/docker.sock")
+        finally:
+          case.doCleanups()
+
+  def test_noncanonical_plugin_fields_refuse_without_silent_fallback(self):
+    original = self.connection()
+    extra = self.plugin_marker(self.base / "extra-plugins", "extra-selected-before-refusal")
+    local = self.plugin_marker(original / "cli-plugins", "local-fallback")
+    field = "cliPluginsExtraDirs"
+    cases = [{alias: [str(extra.parent)]} for alias in ("CLIPluginsExtraDirs", "clipluginsextradirs", "cliPluginſExtraDirs")]
+    cases += [{field: [str(local.parent)], "CLIPluginsExtraDirs": [str(extra.parent)]},
+              {"CLIPluginsExtraDirs": [str(extra.parent)], field: [str(local.parent)]},
+              {field: [str(extra.parent)], "CLIPluginsExtraDirs": [str(extra.parent)]},
+              {field: None, "CLIPluginsExtraDirs": [str(extra.parent)]},
+              {field: [str(extra.parent)], "CLIPluginsExtraDirs": None}]
+    self.change(plugin_discovery=True, plugin_system_dirs=[])
+    for values in cases:
+      with self.subTest(values=values):
+        (self.base / "events").write_text("")
+        (self.base / "docker-selections").write_text("")
+        (original / "config.json").write_text(json.dumps(values))
+        result = self.release()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("requires canonical cliPluginsExtraDirs spelling", result.stderr)
+        self.assertIn("builder", self.events())
+        selected = json.loads((self.base / "docker-selections").read_text().splitlines()[0])
+        effective = list(values.values())[-1] or [str(local.parent)]
+        self.assertEqual(selected["plugin"], str(Path(effective[0]) / "docker-buildx"))
+        self.assertNotIn(str(self.base), result.stdout + result.stderr)
+        self.assertNotIn("CLIPluginsExtraDirs", result.stdout + result.stderr)
+        self.assert_no_writes()
+
+  def assert_setup_refusal(self, result, phase, advice):
+    self.assertNotEqual(result.returncode, 0)
+    self.assertIn("Release stopped (" + phase + ")", result.stderr)
+    self.assertIn("Next:", result.stderr)
+    self.assertIn(advice, result.stderr)
+    self.assertIn("No publication writes were sent by this invocation", result.stderr)
+    self.assertNotIn("Publication verified", result.stdout)
+    self.assertNotIn(str(self.base), result.stdout + result.stderr)
+    self.assertNotIn("SENTINEL_PRIVATE_TOKEN", result.stdout + result.stderr)
+    self.assertEqual(self.events(), [])
+
+  def test_temporary_parent_failures_have_safe_guidance_and_release_lock(self):
+    import fcntl
+    for parent in (self.base / "missing-private-parent", self.token):
+      with self.subTest(parent=parent.name):
+        self.environment["TMPDIR"] = str(parent)
+        result = self.release()
+        self.assert_setup_refusal(result, "temporary storage", "valid writable temporary parent")
+        with (self.root / ".template-operation.lock").open() as lock:
+          fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        self.assertEqual(self.token.read_text(), "SENTINEL_PRIVATE_TOKEN\n")
+
+  def test_temporary_creation_os_failures_suppress_raw_stderr(self):
+    command = self.bin / "mktemp"
+    command.write_text("#!/bin/sh\necho 'SENTINEL_PRIVATE_TOKEN " + str(self.token) + " storage error' >&2\nexit 1\n")
+    command.chmod(0o755)
+    result = self.release()
+    self.assert_setup_refusal(result, "temporary storage", "available space")
+    self.assertNotIn("storage error", result.stderr)
+
+  def test_invalid_inherited_lock_descriptor_has_guidance(self):
+    self.environment["RELEASE_LOCK_FD"] = "999999"
+    self.assert_setup_refusal(self.release(), "checkout lock verification", "filesystem lock support")
+
+  def test_inherited_lock_identity_mismatch_preserves_files(self):
+    (self.root / ".template-operation.lock").write_text("checkout lock")
+    with self.token.open() as foreign:
+      environment = self.environment | {"RELEASE_LOCK_FD": str(foreign.fileno())}
+      result = subprocess.run(["bash", str(self.root / "scripts/release.sh")], env=environment,
+                              pass_fds=(foreign.fileno(),), cwd=self.base, capture_output=True, text=True, timeout=30)
+    self.assert_setup_refusal(result, "checkout lock verification", "Do not delete or bypass")
+    self.assertEqual((self.root / ".template-operation.lock").read_text(), "checkout lock")
+    self.assertEqual(self.token.read_text(), "SENTINEL_PRIVATE_TOKEN\n")
 
   def assert_promotion_read_refuses(self, fault):
     predecessor = self.predecessor()
@@ -935,13 +1084,13 @@ class BashPublicationTests(unittest.TestCase):
   def test_lock_symlink_and_other_lock_owner_refuse(self):
     lock = self.root / ".template-operation.lock"
     lock.symlink_to(self.token)
-    self.assertNotEqual(self.release().returncode, 0)
+    self.assert_setup_refusal(self.release(), "checkout locking", "non-symlink lock file")
     self.assertEqual(self.token.read_text(), "SENTINEL_PRIVATE_TOKEN\n")
     lock.unlink()
     import fcntl
     with lock.open("w") as held:
       fcntl.flock(held, fcntl.LOCK_EX | fcntl.LOCK_NB)
-      self.assertNotEqual(self.release().returncode, 0)
+      self.assert_setup_refusal(self.release(), "checkout locking", "active checkout lock owner")
     self.assert_no_writes()
 
   def test_ignored_worktree_secret_is_not_in_committed_snapshot(self):
@@ -1195,6 +1344,135 @@ class BashDataTests(unittest.TestCase):
   def setUp(self):
     self.data = helper_module()
 
+  def test_docker_plugin_directory_config_is_strict_and_bounded(self):
+    with owned_temporary_directory() as directory:
+      original = Path(directory)
+      path = original / "config.json"
+      expected = [str(original / "cli-plugins")]
+      self.assertEqual(self.data.docker_plugin_dirs(original), expected)
+      for config in ({}, {"cliPluginsExtraDirs": None}, {"cliPluginsExtraDirs": []}):
+        path.write_text(json.dumps(config))
+        self.assertEqual(self.data.docker_plugin_dirs(original), expected)
+      path.write_text(json.dumps({"cliPluginsExtraDirs": ["extra plugins", "/owned/absolute"]}))
+      with patch.object(self.data.os, "getcwd", return_value=directory):
+        self.assertEqual(self.data.docker_plugin_dirs(original), [str(original / "extra plugins"), "/owned/absolute", *expected])
+      invalid = [b"{broken", b"[]", b"null", b"\xff", b'{"cliPluginsExtraDirs":[],"cliPluginsExtraDirs":[]}',
+                 *(json.dumps({"cliPluginsExtraDirs": value}).encode() for value in (True, "directory", {}, [None], [""], ["bad\x00path"]))]
+      for raw in invalid:
+        with self.subTest(raw=raw):
+          path.write_bytes(raw)
+          with self.assertRaises((self.data.Refusal, ValueError)):
+            self.data.docker_plugin_dirs(original)
+      path.write_bytes(b"{}" + b" " * (self.data.CONFIG_LIMIT - 2))
+      self.assertEqual(self.data.docker_plugin_dirs(original), expected)
+      with path.open("ab") as output:
+        output.write(b" ")
+      with self.assertRaisesRegex(self.data.Refusal, "byte limit"):
+        self.data.docker_plugin_dirs(original)
+      with patch.object(Path, "open", side_effect=PermissionError("PRIVATE_CONFIG_PATH")), self.assertRaises(PermissionError):
+        self.data.docker_plugin_dirs(original)
+      path.unlink()
+      path.mkdir()
+      with self.assertRaisesRegex(self.data.Refusal, "must be regular"):
+        self.data.docker_plugin_dirs(original)
+
+  def test_docker_plugin_field_aliases_are_rejected_before_defaults(self):
+    field = "cliPluginsExtraDirs"
+    with owned_temporary_directory() as directory:
+      original = Path(directory)
+      for alias in ("CLIPluginsExtraDirs", "clipluginsextradirs", "cliPluginſExtraDirs"):
+        for value in (None, [], ["PRIVATE_CONFIG_PATH"]):
+          for config in ({alias: value}, {field: [], alias: value}, {alias: value, field: []}):
+            with self.subTest(config=config):
+              (original / "config.json").write_text(json.dumps(config))
+              with self.assertRaisesRegex(self.data.Refusal, "requires canonical cliPluginsExtraDirs spelling") as raised:
+                self.data.docker_plugin_dirs(original)
+              self.assertNotIn(alias, str(raised.exception))
+              self.assertNotIn("PRIVATE_CONFIG_PATH", str(raised.exception))
+
+  def test_lock_bootstrap_errors_close_descriptors_and_hide_os_details(self):
+    with owned_temporary_directory() as directory:
+      path = Path(directory) / ".template-operation.lock"
+      with patch.object(self.data.os, "open", side_effect=PermissionError("PRIVATE_LOCK_PATH")), \
+           patch.object(self.data.os, "close") as close:
+        with self.assertRaises(self.data.SetupRefusal) as raised:
+          self.data.locked(directory, "unused")
+        self.assertEqual(raised.exception.phase, "checkout locking")
+        self.assertIn("checkout access", raised.exception.advice)
+        self.assertNotIn("PRIVATE_LOCK_PATH", str(raised.exception))
+        close.assert_not_called()
+      failures = (BlockingIOError(errno.EAGAIN, "PRIVATE_LOCK_PATH"), PermissionError("PRIVATE_LOCK_PATH"),
+                  OSError(errno.ENOSPC, "PRIVATE_LOCK_PATH"))
+      for failure in failures:
+        with self.subTest(failure=type(failure).__name__):
+          fd = os.open(path, os.O_CREAT | os.O_RDWR, 0o600)
+          with patch.object(self.data.os, "open", return_value=fd), patch.object(self.data.fcntl, "flock", side_effect=failure):
+            with self.assertRaises(self.data.SetupRefusal) as raised:
+              self.data.locked(directory, "unused")
+          self.assertEqual(raised.exception.phase, "checkout locking")
+          self.assertNotIn("PRIVATE_LOCK_PATH", str(raised.exception))
+          with self.assertRaises(OSError):
+            os.fstat(fd)
+      fd = os.open(path, os.O_RDWR)
+      with patch.object(self.data.os, "open", return_value=fd), \
+           patch.object(self.data.subprocess, "Popen", side_effect=OSError(errno.EAGAIN, "PRIVATE_CHILD_PATH")):
+        with self.assertRaises(self.data.SetupRefusal) as raised:
+          self.data.locked(directory, "unused")
+      self.assertEqual(raised.exception.phase, "locked child startup")
+      self.assertIn("Bash availability", raised.exception.advice)
+      self.assertNotIn("PRIVATE_CHILD_PATH", str(raised.exception))
+      with self.assertRaises(OSError):
+        os.fstat(fd)
+      with path.open() as available:
+        self.data.fcntl.flock(available, self.data.fcntl.LOCK_EX | self.data.fcntl.LOCK_NB)
+
+  def test_lock_bootstrap_retains_child_status_and_descriptor_inheritance(self):
+    with owned_temporary_directory() as directory, patch.object(self.data.subprocess, "Popen") as start, \
+         patch.object(self.data.signal, "signal"):
+      start.return_value.wait.return_value = 7
+      self.assertEqual(self.data.locked(directory, "fixture-release.sh"), 7)
+      self.assertEqual(start.call_args.args[0], ["bash", "fixture-release.sh"])
+      fd, = start.call_args.kwargs["pass_fds"]
+      self.assertEqual(start.call_args.kwargs["env"]["RELEASE_LOCK_FD"], str(fd))
+      self.assertTrue(start.call_args.kwargs["start_new_session"])
+      with self.assertRaises(OSError):
+        os.fstat(fd)
+
+  def test_optional_temporary_parent_runs_real_bearer_and_publication_setup(self):
+    real_directory = tempfile.TemporaryDirectory
+    real_is_dir = Path.is_dir
+    real_mkdir = os.mkdir
+    with owned_temporary_directory() as directory:
+      base = Path(directory)
+      preferred, fallback = base / "preferred", base / "fallback"
+      preferred.mkdir()
+      fallback.mkdir()
+      for present in (True, False):
+        chosen = []
+        def is_dir(path):
+          return present if path == Path("/tmp/opencode") else real_is_dir(path)
+        def create(*args, **kwargs):
+          if kwargs.get("dir") == "/tmp/opencode":
+            self.assertTrue(present, "Absent preferred parent must not be selected")
+            kwargs["dir"] = str(preferred)
+          result = real_directory(*args, **kwargs)
+          chosen.append(Path(result.name).parent)
+          return result
+        def mkdir(path, *args, **kwargs):
+          self.assertNotEqual(Path(path).parent, Path("/tmp/opencode"), "Do not create beneath the simulated missing global parent")
+          return real_mkdir(path, *args, **kwargs)
+        with self.subTest(present=present), patch.object(Path, "is_dir", is_dir), \
+             patch.object(tempfile, "TemporaryDirectory", create), patch.object(tempfile, "tempdir", None), \
+             patch.dict(os.environ, {"TMPDIR": str(fallback)}), patch.object(os, "mkdir", mkdir):
+          self.test_same_origin_bearer_challenge_retries_with_private_token()
+          publication = BashPublicationTests()
+          try:
+            publication.setUp()
+            self.assertTrue(publication.root.is_dir())
+            self.assertEqual(chosen, [preferred if present else fallback] * 2)
+          finally:
+            publication.doCleanups()
+
   def http_reply(self, status, body, headers=None):
     raw = "HTTP/1.1 " + str(status) + " Fixture\r\n"
     raw += "".join(key + ": " + value + "\r\n" for key, value in (headers or {}).items()) + "\r\n"
@@ -1333,7 +1611,7 @@ class BashDataTests(unittest.TestCase):
     replies = [self.http_reply(401, b"{}", {"WWW-Authenticate": 'Bearer realm="https://fixture.invalid/token",service="registry"'}),
                self.http_reply(200, b'{"token":"FIXTURE_BEARER_TOKEN"}'),
                self.http_reply(200, body, {"Docker-Content-Digest": digest})]
-    with tempfile.TemporaryDirectory(dir="/tmp/opencode") as work, patch.object(self.data, "capture", side_effect=replies) as capture:
+    with owned_temporary_directory(prefix="bash-release-bearer-") as work, patch.object(self.data, "capture", side_effect=replies) as capture:
       self.assertEqual(self.data.registry(work, "https://fixture.invalid", "fixture.invalid/fixtures/application",
                                           "manifests", digest), (digest, {"schemaVersion": 2}))
       calls = [call.args[0] for call in capture.call_args_list]

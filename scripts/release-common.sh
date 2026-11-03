@@ -7,6 +7,10 @@ progress() { printf 'Release progress: %s\n' "$1" >&2; }
 stage() { phase=$1; progress "$phase"; }
 recovery() {
   case "${phase:-local setup}" in
+    'checkout locking'|'checkout lock verification')
+      echo 'Next: inspect or wait for the active checkout lock owner; check checkout access and filesystem lock support. Do not delete or bypass the lock.' >&2 ;;
+    'temporary storage')
+      echo 'Next: check a valid writable temporary parent, available space, and permissions; review TMPDIR and docs/bash-configuration.md. Do not bypass checkout locking.' >&2 ;;
     'local setup'|'prerequisite checks')
       echo 'Next: review required tools, configuration, and checkout locking in docs/bash-configuration.md.' >&2 ;;
     'builder readiness')

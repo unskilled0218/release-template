@@ -39,6 +39,13 @@ class CommandFailed(Refusal):
   pass
 
 
+class SetupRefusal(Refusal):
+  def __init__(self, phase, message, advice):
+    super().__init__(message)
+    self.phase = phase
+    self.advice = advice
+
+
 def require(value, message):
   if not value:
     raise Refusal(message)
@@ -279,6 +286,27 @@ def notes(root, commit, config):
   return text
 
 
+def docker_plugin_dirs(original):
+  path = original / "config.json"
+  try:
+    metadata = path.stat()
+  except FileNotFoundError:
+    config = {}
+  else:
+    require(stat.S_ISREG(metadata.st_mode), "Docker configuration must be regular")
+    config = document(path, CONFIG_LIMIT)
+  require(isinstance(config, dict), "Invalid Docker configuration")
+  field = "cliPluginsExtraDirs"
+  require(all(key == field or key.casefold() != field.casefold() for key in config),
+          "Docker plugin discovery requires canonical cliPluginsExtraDirs spelling")
+  directories = config.get(field)
+  if directories is None:
+    directories = []
+  require(isinstance(directories, list) and all(isinstance(value, str) and value and
+          not re.search(r"[\x00-\x1f\x7f]", value) for value in directories), "Invalid Docker plugin directories")
+  return [os.path.abspath(value) for value in directories] + [str(original / "cli-plugins")]
+
+
 def auth(root, work):
   config = settings(root)
   username = os.environ.get("GIT_USERNAME", config["username"])
@@ -302,10 +330,11 @@ def auth(root, work):
   (work / "api.curl").write_text('header = "Authorization: token ' + token + '"\n')
   basic = base64.b64encode((username + ":" + token).encode()).decode()
   (work / "registry.curl").write_text('header = "Authorization: Basic ' + basic + '"\n')
-  original = Path(os.environ.get("DOCKER_CONFIG") or str(Path.home() / ".docker"))
+  original = Path(os.path.abspath(os.environ.get("DOCKER_CONFIG") or str(Path.home() / ".docker")))
   docker = work / "docker"
   docker.mkdir()
-  write(docker / "config.json", {"auths": {urlsplit(config["gitea"]).netloc: {}}})
+  write(docker / "config.json", {"auths": {urlsplit(config["gitea"]).netloc: {}},
+                               "cliPluginsExtraDirs": docker_plugin_dirs(original)})
   if (original / "contexts").is_dir():
     shutil.copytree(original / "contexts", docker / "contexts")
   for path in work.iterdir():
@@ -597,6 +626,36 @@ def snapshot(root, commit, destination):
   archive_path.unlink()
 
 
+def locked(root, script):
+  advice = "Inspect or wait for the active checkout lock owner; check checkout permissions and filesystem lock support. Do not delete or bypass the lock."
+  try:
+    fd = os.open(Path(root) / ".template-operation.lock", os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
+  except OSError:
+    raise SetupRefusal("checkout locking", "Cannot open checkout lock", "Check checkout access, permissions, and a regular non-symlink lock file. Do not delete or bypass an active lock.") from None
+  try:
+    try:
+      fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+      raise SetupRefusal("checkout locking", "Checkout lock is held", advice) from None
+    except OSError:
+      raise SetupRefusal("checkout locking", "Cannot acquire checkout lock", advice) from None
+    environment = os.environ | {"RELEASE_LOCK_FD": str(fd)}
+    try:
+      child = subprocess.Popen(["bash", script], env=environment, pass_fds=(fd,), start_new_session=True)
+    except OSError:
+      raise SetupRefusal("locked child startup", "Cannot start locked release process", "Check Bash availability, process resources, and checkout access; retry only after the setup problem is resolved.") from None
+    def forward(number, _frame):
+      try:
+        os.killpg(child.pid, number)
+      except ProcessLookupError:
+        pass
+    signal.signal(signal.SIGTERM, forward)
+    signal.signal(signal.SIGINT, forward)
+    return child.wait()
+  finally:
+    os.close(fd)
+
+
 def dispatch(args):
   action, *args = args
   if action == "settings":
@@ -662,23 +721,7 @@ def dispatch(args):
     advertised = {value.strip().rstrip("*") for line in matches for value in line.split(",")}
     require(set(PLATFORMS) <= advertised, "Builder must advertise linux/amd64 and linux/arm64")
   elif action == "locked":
-    root, script = args
-    path = Path(root) / ".template-operation.lock"
-    fd = os.open(path, os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
-    try:
-      fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-      environment = os.environ | {"RELEASE_LOCK_FD": str(fd)}
-      child = subprocess.Popen(["bash", script], env=environment, pass_fds=(fd,), start_new_session=True)
-      def forward(number, _frame):
-        try:
-          os.killpg(child.pid, number)
-        except ProcessLookupError:
-          pass
-      signal.signal(signal.SIGTERM, forward)
-      signal.signal(signal.SIGINT, forward)
-      return child.wait()
-    finally:
-      os.close(fd)
+    return locked(*args)
   elif action == "lock-check":
     fd = int(os.environ["RELEASE_LOCK_FD"])
     path = Path(args[0]) / ".template-operation.lock"
@@ -698,6 +741,11 @@ if __name__ == "__main__":
   try:
     require(sys.version_info >= (3, 11), "Python 3.11 or later is required")
     sys.exit(dispatch(sys.argv[1:]))
+  except SetupRefusal as exc:
+    print("Release stopped (" + exc.phase + "): " + str(exc), file=sys.stderr)
+    print("Next: " + exc.advice, file=sys.stderr)
+    print("No publication writes were sent by this invocation; existing remote state may still need inspection. Follow docs/bash-publication.md#retry-states before retrying.", file=sys.stderr)
+    sys.exit(1)
   except (Refusal, OSError, ValueError, KeyError, TypeError, IndexError, AttributeError, RecursionError, subprocess.SubprocessError) as exc:
     # Never relay raw remote bodies, command stderr, config values, or credential paths.
     print("Release stopped: " + (str(exc) if isinstance(exc, Refusal) else "Invalid or unavailable input"), file=sys.stderr)

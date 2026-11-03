@@ -21,6 +21,7 @@ if [[ "${1:-}" == --validate ]]; then
   echo 'Configuration valid; no credentials or remote operations used'
   exit 0
 fi
+publication_state=none
 if [[ -z "${RELEASE_LOCK_FD:-}" ]]; then stage 'prerequisite checks'; fi
 for tool in git docker curl; do
   command -v "$tool" >/dev/null || stop "Required command unavailable: $tool. Install $tool and make it available on PATH (Docker also needs Buildx)"
@@ -29,18 +30,20 @@ for marker in release-template.lock.json scripts/release-template .template-tran
   [[ ! -e "$root/$marker" && ! -L "$root/$marker" ]] || stop 'Old installation state; use its preserved original checkout/pin, not this command'
 done
 if [[ -z "${RELEASE_LOCK_FD:-}" ]]; then
+  stage 'checkout locking'
   exec python3 -B "$root/scripts/release-data.py" locked "$root" "$root/scripts/release.sh"
 fi
-data lock-check "$root"
+stage 'checkout lock verification'
+data lock-check "$root" || stop 'Cannot verify inherited checkout lock'
 umask 077
-work=$(mktemp -d "${TMPDIR:-/tmp}/bash-release.XXXXXXXX")
-publication_state=none
-stage 'local setup'
+stage 'temporary storage'
+work=$(mktemp -d "${TMPDIR:-/tmp}/bash-release.XXXXXXXX" 2>/dev/null) || stop 'Cannot create private temporary directory'
 cleanup() { rm -rf -- "$work"; }
 trap cleanup EXIT
 trap unexpected_failure ERR
 trap 'interrupted 130' INT
 trap 'interrupted 143' TERM
+stage 'local setup'
 data settings "$root" "$work/settings.json"
 tag=$(field "$work/settings.json" tag)
 version=$(field "$work/settings.json" version)

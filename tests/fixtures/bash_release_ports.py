@@ -64,8 +64,25 @@ def docker_selection():
   buildx = Path(os.environ.get("BUILDX_CONFIG") or str(directory / "buildx"))
   current = json.loads((buildx / "current").read_text()) if (buildx / "current").exists() else {}
   builder = os.environ.get("BUILDX_BUILDER") or current.get("Name", "default")
-  return {"operation": arguments[:2], "context": context, "endpoint": endpoint, "tls": tls, "builder": builder,
-          "tls_verify": os.environ.get("DOCKER_TLS_VERIFY"), "cert_path": os.environ.get("DOCKER_CERT_PATH")}
+  result = {"operation": arguments[:2], "context": context, "endpoint": endpoint, "tls": tls, "builder": builder,
+            "tls_verify": os.environ.get("DOCKER_TLS_VERIFY"), "cert_path": os.environ.get("DOCKER_CERT_PATH")}
+  if state.get("plugin_discovery") and arguments[0] == "buildx":
+    # Model the original Go struct decoder independently of the canonical-only helper.
+    extra = []
+    for key, value in configuration.items():
+      if key.casefold() == "cliPluginsExtraDirs".casefold():
+        extra = value or []
+    assert isinstance(extra, list) and all(isinstance(value, str) for value in extra)
+    directories = [*map(Path, extra), directory / "cli-plugins", *map(Path, state["plugin_system_dirs"])]
+    for candidate in (path / "docker-buildx" for path in directories):
+      if candidate.exists():
+        assert candidate.is_file() and os.access(candidate, os.X_OK), "Invalid plugin candidate must not fall through"
+        result |= {"plugin": str(candidate.absolute()), "plugin_identity": candidate.read_text()}
+        break
+    else:
+      event("plugin-discovery-missing")
+      sys.exit(1)
+  return result
 
 
 if tool == "git":
@@ -163,6 +180,12 @@ if tool == "docker":
     assert "credsStore" not in config and "credHelpers" not in config
     assert "SENTINEL_PRIVATE_TOKEN" not in json.dumps(config)
     assert "UNRELATED_AUTH_SENTINEL" not in json.dumps(config)
+    if state.get("plugin_discovery"):
+      assert set(config) == {"auths", "cliPluginsExtraDirs"}
+      assert all(Path(value).is_absolute() for value in config["cliPluginsExtraDirs"])
+      # Persist only the synthetic private config for post-login fixture assertions.
+      (base / "private-docker-config.json").write_text(json.dumps(config))
+      (Path(os.environ["DOCKER_CONFIG"]) / "config.json").write_text(json.dumps(config))
   elif arguments[:2] == ["buildx", "build"]:
     event("build")
     if state.get("build_barrier"):

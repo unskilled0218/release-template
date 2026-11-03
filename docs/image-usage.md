@@ -16,7 +16,7 @@ docker run --rm git.lan/dev/container-release-template-hello:latest
 
 The default command prints `Hello World` and exits zero. Registry login may persist credentials through Docker's configured store; use a private temporary `DOCKER_CONFIG` when temporary authentication is required, while preserving the selected daemon/context. The release tool isolates its authentication automatically and does not log the caller in permanently.
 
-Version 0.6.2 verifies that the configured package is associated with `dev/container-release-template` after publication, so authorized users can find it in that repository's Packages tab. Association applies to every version of the package, preserves an existing correct link, and refuses observed links elsewhere. A verified completed-publication retry may finish a missing link without republishing; see [package association and writer exclusion](bash-publication.md#package-association). This checkout has no live 0.6.2 publication or UI verification evidence.
+Version 0.6.3 verifies that the configured package is associated with `dev/container-release-template` after publication, so authorized users can find it in that repository's Packages tab. Association applies to every version of the package, preserves an existing correct link, and refuses observed links elsewhere. A verified completed-publication retry may finish a missing link without republishing; see [package association and writer exclusion](bash-publication.md#package-association). This checkout has no live 0.6.3 publication or UI verification evidence.
 
 ## Platforms and immutable references
 
