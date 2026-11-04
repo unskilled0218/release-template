@@ -4,24 +4,24 @@
   - [Use](#use)
   - [Development](#development)
 
-Version 0.6.3 builds and publishes one AMD64/ARM64 container image, then links its package to the configured Gitea repository for the Packages tab. Private authentication preserves Buildx discovery; early setup failures give safe next steps. Python's standard library handles strict data and bounded I/O; no jq, Node, or Python packages are needed. See [release notes](docs/releases/0.6.3.md).
+Version 0.6.3 publishes one AMD64/ARM64 container image and links its package to a Gitea repository. See [release notes](docs/releases/0.6.3.md).
 
 ## Use
 
-Review [configuration and credentials](docs/bash-configuration.md) once, set your target/login in `scripts/release.json`, and provision a private `~/.config/git/token` file. This repository's settings explicitly target its existing Gitea project and Hello World image; change them before copying it elsewhere. Replace the root Hello World Dockerfile with your application when adopting the template.
+Follow [configuration and credentials](docs/bash-configuration.md). When copying the template, replace the sample Dockerfile, Git remote, and target/login settings in `scripts/release.json`. Store your token privately in `~/.config/git/token`.
 
 ```sh
 ./scripts/release.sh --validate
 ./scripts/release.sh
 ```
 
-Run publication only from clean, already-pushed `main`, with Git authentication, trusted HTTPS, and a Buildx builder advertising both platforms. Follow the [release process and troubleshooting checklist](docs/release-process.md). New package links require stable Gitea 1.25.x or exact stable 28.2.0. The command publishes real Git/image/release/package-link changes. Read [publication and partial failures](docs/bash-publication.md) first, including exclusive package-writer requirements. It never deletes images, reassigns packages, or performs retention cleanup.
+Publication writes real Git tags, images, releases, and package links. Use clean, already-pushed `main` and exclude other writers through completion. New package links require stable Gitea 1.25.x or exact stable 28.2.0. Read the [release checklist](docs/release-process.md) and [recovery rules](docs/bash-publication.md) first.
 
-Only the Bash workflow is supported in this checkout. Historical transactions require their preserved original checkout/pin; no migration or managed updater is provided. Verification is local only; review the [known limits](docs/bash-publication.md#known-limits) before publication.
+Only the Bash workflow is supported. It does not migrate old transactions, update itself, delete images, or reassign packages. Verification is local only; see [known limits](docs/bash-publication.md#known-limits).
 
 ## Development
 
-Requires Bash and Python 3.11+ on Linux/POSIX. Publication additionally needs Git, curl, Docker Buildx, and working local filesystem locks. Tests use fake command ports and temporary Git repositories, not production services. A pre-created `/tmp/opencode` directory is optional, not required.
+Requires Bash and Python 3.11+ on Linux/POSIX. Publication also needs Git, curl, Docker Buildx, and filesystem locks. No jq, Node, or Python packages are needed.
 
 ```sh
 python3 -B -m unittest discover -s tests -v
@@ -29,4 +29,4 @@ for script in scripts/*.sh; do bash -n "$script"; done
 ./scripts/release.sh --validate
 ```
 
-See [verification](docs/verification.md) for test boundaries, [image usage](docs/image-usage.md), and [platform preparation](docs/platform-preparation.md). Root `VERSION` is the sole project version source; README and committed versioned notes must agree with it. No other project is modified automatically.
+Root `VERSION`, README, and committed release notes must agree. See [verification](docs/verification.md), [image usage](docs/image-usage.md), and [platform preparation](docs/platform-preparation.md).

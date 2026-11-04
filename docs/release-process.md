@@ -12,46 +12,38 @@
 
 ## Prepare the project
 
-1. Follow [configuration and credentials](bash-configuration.md) when copying this template. Replace its sample Dockerfile, repository/image targets, Git remote, and account settings before running publication. No other project is updated automatically.
-2. Run your application's tests separately. Set root `VERSION` and prepare the configured committed release notes with the matching heading. Commit all release inputs and push clean `main` to the configured repository; the release command does not push source.
-3. Arrange exclusive publication and package-association access through completion, including other checkouts, UI actions, and in-flight requests. Keep checkout Git configuration unchanged as well. The checkout lock alone does not exclude those writers or configuration edits.
+1. Follow [configuration and credentials](bash-configuration.md). Replace copied sample Dockerfile, target, remote, and account settings.
+2. Run application tests. Set root `VERSION` and matching release notes, commit all inputs, and push clean `main`. Publication does not push source.
+3. Exclude other publication/package writers, UI actions, and in-flight requests through completion. Keep checkout/tool configuration and plugin files unchanged; the local lock cannot enforce this elsewhere.
 
 ## Check prerequisites
 
-Check installed tools before invoking Docker or contacting servers: Bash, Python 3.11+ with its standard library, Git, curl, Docker with Buildx, standard Linux utilities, and working local filesystem locks. There are no jq, Node, or pip dependencies. The command checks Python and availability of Git/Docker/curl; builder inspection checks usable Buildx. It does not install missing tools or certify every tool version.
+Install Bash, Python 3.11+, Git, curl, Docker Buildx, and standard Linux utilities; ensure filesystem locks work. No jq, Node, or pip packages are needed. The command checks tools before builder access but installs nothing.
 
-Provision the private token and independent Git authentication as described in [credentials and prerequisites](bash-configuration.md#credentials-and-prerequisites). Keep Git/curl/Docker HTTPS trust enabled. Do not put tokens in arguments, shell history, Git, or copied project files.
+Provision a [private token and separate Git authentication](bash-configuration.md#credentials-and-prerequisites). Keep HTTPS trust enabled and tokens out of arguments, history, Git, and logs.
 
 ```sh
 ./scripts/release.sh --validate
 ```
 
-Validation checks configuration, version, and local paths only. It does not read credentials, inspect Docker, lock the checkout, test connectivity, prove publication permissions, or write remote objects.
+Validation checks local settings/version/paths only, without credentials, Docker, locks, or network access. It does not prove publication permissions.
 
 ## Check platform readiness
 
-Confirm the intended Docker context/host and selected Buildx builder before publication. The release command runs `docker buildx inspect --bootstrap` and requires advertised `linux/amd64` and `linux/arm64` support. Bootstrap may start the selected builder; it does not configure host emulation. A working Docker connection is required before platform advertising can be checked.
+Confirm the Docker context/host and Buildx builder. Publication runs `docker buildx inspect --bootstrap` and requires advertised `linux/amd64` and `linux/arm64`. Bootstrap may start the builder, but does not configure host emulation.
 
-Use native builder nodes where possible. If emulation is needed, only an authorized administrator may run this optional preparation on the relevant daemon host:
-
-```sh
-docker run --privileged --rm tonistiigi/binfmt --install amd64,arm64 && docker buildx inspect --bootstrap
-```
-
-This changes host kernel handlers and requires privileged access. Verify the selected host first, especially with remote builders. The release command never runs it automatically. See [platform preparation](platform-preparation.md) for host scope and separately approved runtime checks.
-
-Advertised platforms do not prove that your application's Dockerfile compiles on both architectures or that containers execute on the runtime host. The actual build and immutable image checks establish different evidence; native/emulated runtime execution requires separate verification.
+Prefer native nodes. If emulation is needed, arrange administrator-approved [platform preparation](platform-preparation.md) on the correct hosts. Advertising does not prove application build or runtime success; runtime checks are separate.
 
 ## Check service readiness
 
-Run `./scripts/release.sh` only when ready to publish. There is no separate network-only preflight mode. Existing bounded reads establish the following evidence before the fresh build:
+There is no network-only preflight mode. Run publication only when ready for writes. Before a fresh build, bounded reads check:
 
-- Docker: selected builder inspection/bootstrap and context selection establish builder access and advertised platforms, not application build success.
-- Git: the first effective fetch URL and exactly one effective push URL must match the configured target; enumeration includes URL rewrites and fallback URLs. Multiple push entries, including duplicates, are refused. `git ls-remote` must show remote `main` at the captured source commit. Independent Git authentication must work.
-- Gitea: complete authenticated tag/release inventories classify the requested version before staging lookup or publication writes. Failed, malformed, oversized, or incomplete evidence stops the command.
-- Registry: predecessor and staging manifest reads verify registry access and matching evidence. Login precedes a fresh build or staging reuse; read access and login do not prove that a later push will be authorized.
+- Docker: builder access and advertised platforms.
+- Git: [matching fetch/push destinations](bash-configuration.md#files-and-setup) and remote `main` at the captured commit.
+- Gitea: complete authenticated tag/release inventories for the requested version.
+- Registry: predecessor/staging manifests and matching evidence; login precedes build or staging reuse.
 
-Ping, open ports, and one successful HTTP response are not substitutes for these service-specific checks. Reads cannot guarantee every future write permission or continued service availability. Repository/package access, stable Gitea 1.25.x or exact stable 28.2.0 authority for a new package link, and exact association evidence are checked after publication under the existing [package association rules](bash-publication.md#package-association); they are not early-readiness guarantees.
+Failed or incomplete evidence stops publication. Successful reads/login do not guarantee later write permissions or availability. Package permissions, server-version gates, and association evidence are checked **after publication** under the [association rules](bash-publication.md#package-association), not as early-readiness guarantees.
 
 ## Build and publish
 
@@ -59,36 +51,33 @@ Ping, open ports, and one successful HTTP response are not substitutes for these
 ./scripts/release.sh
 ```
 
-For a fresh version, the command reuses verified staging evidence or builds both platforms from a private committed snapshot. `docker buildx build --push` builds and pushes the staging image together; there is no separate local build followed by a later independent push command. Staging content may exist even if the build command reports failure.
+The command reuses verified staging or builds both platforms from committed source with `docker buildx build --push`. Staging may exist even when the build reports failure.
 
-After immutable image and build-metadata verification, the command publishes the exact annotated Git tag, promotes the verified digest to `latest` without rebuilding, creates the notes-only Gitea release, verifies publication, associates the configured package, and rechecks publication and association. See [publication sequence and recovery](bash-publication.md) for exact guards, retry classifications, and resource limits. There is no automatic image deletion, retention, rollback, package reassignment, or host setup.
+It verifies the immutable image, pushes the annotated tag, promotes the digest without rebuilding, creates the notes-only release, and verifies publication and package association. See [publication and recovery](bash-publication.md) for guards and limits. No image deletion, retention, rollback, reassignment, or host setup runs automatically.
 
-Once a successful read confirms `latest` at the prepared digest, later fresh guards require that digest exactly, even if the promotion write was skipped or its response was lost. An observed reversion to the original predecessor is no longer eligible for release creation. Refusal preserves accepted tag/image state without repromotion or repair.
-
-Completed matching publications take a verification path with no build, staging lookup, promotion, tag push, or release POST. Only a missing package association may be completed under the existing scoped rules. Tag-only/release-only startup states stop for inspection instead of automatic repair.
+Completed matching publications are verified without rebuilding or republishing; only a missing package link may be completed. Partial/ambiguous states stop under the [retry rules](bash-publication.md#retry-states).
 
 ## Progress and verification
 
-`Release progress:` messages go to stderr before each major stage, including builder/platform checks, source/notes, credentials, remote inventory, staging lookup, login, build/staging push, tag publication, promotion, release creation, package association, and final verification. Reused staging and already-matching promotion are reported explicitly. Completed retries report verification rather than announcing a new build.
+`Release progress:` milestones appear on stderr before major stages. They report staging reuse and skipped promotion, but are not live build logs, heartbeats, or percentages. A long build may remain at one milestone until completion or timeout.
 
-These are milestone logs, not live Docker build output, continuous heartbeats, or percentage estimates. A long build can remain at the same milestone until completion or timeout. Raw command output, server bodies, credential paths, and auth files are not relayed; shell tracing stays disabled. Build completion is reported only after immutable image and metadata verification. Final stdout retains `Publication verified` with the version, immutable image, `latest` alias, and release URL; only that summary announces successful publication.
+Raw command output, server bodies, credential paths, and auth files are not relayed. Build completion follows immutable-image verification. Only final `Publication verified` announces success, with version, immutable image, latest alias, and release URL.
 
-Failures print fixed stage-specific next steps, including checkout lock acquisition/verification, locked-child startup, and temporary storage before ordinary failure traps exist. Lock advice never recommends deleting or bypassing an active lock. Temporary-storage errors suppress raw paths and do not silently switch an invalid caller-selected parent. Before publication writes, messages say that this invocation sent none, while noting that older remote state may still exist. After a possible staging/publication write, they warn that publication may be incomplete or uncertain and direct you to inspect exact remaining objects without rollback.
+Failures print stage-specific next steps, including early lock/storage failures. They distinguish no writes by this invocation from possible accepted writes; older remote state may exist in either case. Inspect uncertain state without rollback.
 
-Changes to release scripts alter annotation-bound script identity. Keep the original checkout/pin for historical retries; changed scripts cannot adopt publications bound to an older script hash. Passing local tests is not live publication approval; retain the [known limits](bash-publication.md#known-limits).
+Keep the original checkout/pin for historical retries: changed script hashes cannot adopt old publications. Passing local tests is not live approval; see [known limits](bash-publication.md#known-limits).
 
 ## Troubleshooting
 
-- Missing tools: install the named command and make it available on `PATH`; Docker also requires Buildx. Ask your environment administrator to install prerequisites if you lack access. Re-run local validation after setup; do not change host configuration automatically.
-- Unusable Docker/builder: check daemon availability, socket permissions, selected context or `DOCKER_HOST`, TLS metadata, and Buildx installation. Diagnose access before changing emulation. Do not use privileged binfmt setup as a remedy for a generic connection failure. Auth isolation preserves reviewed plugin search precedence; see [configuration restrictions](bash-configuration.md#credentials-and-prerequisites) for canonical discovery-field spelling and bounded parsing.
-- Checkout lock/setup failure: inspect or wait for the active owner and check checkout access and filesystem lock support. Do not delete the lock or bypass writer exclusion. For temporary-storage failure, check a valid writable `TMPDIR` parent, available space, and permissions without exposing paths or tokens in support logs.
-- Missing ARM64/AMD64 advertisement: check the selected builder's nodes and advertised platforms. Use native nodes or arrange administrator-approved emulation as described in [platform preparation](platform-preparation.md). Do not silently select a different host or drop an architecture.
-- Dirty/unpushed source or invalid notes: review `git status`, current branch, effective remotes, root `VERSION`, and committed notes. Commit and push the intended source separately before a new release. If partial publication already exists, inspect its captured identity before changing release inputs.
-- Credential failures: check token ownership, permissions, location outside the project, account resource permissions, and independent Git authentication. Do not print tokens or credential paths into support logs; do not weaken file permissions or HTTPS checks to continue.
-- DNS/TLS/service failures: check resolution, network routing, service availability, trusted certificates, and account access for the selected Git/Gitea/registry endpoints. API access and registry access are separate; a successful inventory does not prove push or link permissions. Never bypass trust or follow an unexpected auth redirect as a workaround.
-- Build/staging-push failure: review your Dockerfile, architecture-specific application dependencies, builder resources, and registry push permissions. No raw compiler/build logs are streamed by this workflow. Application-specific diagnostics must be gathered separately in an approved environment without release credentials. Staging may have been accepted; inspect exact state before retrying the unchanged identity.
-- Partial or ambiguous publication: follow [retry states](bash-publication.md#retry-states). A failed response can follow an accepted image, tag, alias, release, or link write. Preserve those objects. Do not blindly retry, rewrite tags, delete evidence, roll back aliases, reassign packages, or change source/scripts to force adoption. Manual completion needs separate review.
+- **Missing tools:** install the named command on `PATH`, or ask your administrator. Docker needs Buildx.
+- **Docker access:** check daemon, socket permissions, context/host, TLS, and Buildx. Emulation setup is not a connectivity fix. Review [Docker config restrictions](bash-configuration.md#credentials-and-prerequisites).
+- **Lock/storage:** wait for the lock owner; check permissions and filesystem support. Never delete/bypass an active lock. Check writable `TMPDIR`, free space, and permissions; invalid storage is not silently replaced.
+- **Missing platform:** use native nodes or approved [emulation setup](platform-preparation.md). Do not silently change hosts or drop an architecture.
+- **Source/notes:** check `git status`, branch, remotes, `VERSION`, and committed notes. Inspect any partial publication before changing inputs.
+- **Credentials/services:** check token ownership/mode, resource permissions, separate Git authentication, DNS, and trusted HTTPS. Do not expose tokens/paths or weaken trust/permissions.
+- **Build/push:** check Dockerfile, architecture dependencies, builder resources, and registry permissions. Gather application logs separately in an approved environment without release credentials. Inspect possibly accepted staging before retrying.
+- **Partial publication:** follow [retry states](bash-publication.md#retry-states). Preserve accepted objects; do not force adoption by deletion, rollback, tag rewriting, reassignment, or changed inputs. Manual completion needs review.
 
 ## Recommendations
 
-Run application tests before committing release source, prefer native ARM64 build nodes where practical, store credentials outside the checkout, and maintain exclusive writers through final verification. Review copied target settings and release notes for every adopting project. Consider separately approved runtime checks when execution on both architectures matters. These recommendations are operator responsibilities, not extra automatic checks or installation steps.
+Prefer native ARM64 nodes and separately approved runtime checks when both architectures matter. Application tests, host preparation, and writer exclusion remain operator responsibilities, not automatic release steps.
