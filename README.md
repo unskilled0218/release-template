@@ -4,7 +4,7 @@
   - [Use](#use)
   - [Development](#development)
 
-Version 0.6.3 builds and publishes one AMD64/ARM64 container image, then links its package to the configured Gitea repository for the Packages tab. Private authentication preserves Buildx discovery; early setup failures give safe next steps. Python's standard library handles strict data and bounded I/O; no jq, Node, or Python packages are needed. See [release notes](docs/releases/0.6.3.md).
+Version 0.7.0 publishes one AMD64/ARM64 image under two tags: the plain release version (for example, `:1.2.3`) and `:latest`. It links the image package to the configured Gitea repository. See [release notes](docs/releases/0.7.0.md).
 
 ## Use
 

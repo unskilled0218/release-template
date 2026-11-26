@@ -59,13 +59,13 @@ Ping, open ports, and one successful HTTP response are not substitutes for these
 ./scripts/release.sh
 ```
 
-For a fresh version, the command reuses verified staging evidence or builds both platforms from a private committed snapshot. `docker buildx build --push` builds and pushes the staging image together; there is no separate local build followed by a later independent push command. Staging content may exist even if the build command reports failure.
+For a fresh version, staging uses the plain version tag, such as `1.2.3`. The command reuses verified version content or builds both platforms from a private committed snapshot. `docker buildx build --push` can publish the version tag even if the build command reports failure. `latest` moves only after digest verification and Git tag publication.
 
 After immutable image and build-metadata verification, the command publishes the exact annotated Git tag, promotes the verified digest to `latest` without rebuilding, creates the notes-only Gitea release, verifies publication, associates the configured package, and rechecks publication and association. See [publication sequence and recovery](bash-publication.md) for exact guards, retry classifications, and resource limits. There is no automatic image deletion, retention, rollback, package reassignment, or host setup.
 
 Once a successful read confirms `latest` at the prepared digest, later fresh guards require that digest exactly, even if the promotion write was skipped or its response was lost. An observed reversion to the original predecessor is no longer eligible for release creation. Refusal preserves accepted tag/image state without repromotion or repair.
 
-Completed matching publications take a verification path with no build, staging lookup, promotion, tag push, or release POST. Only a missing package association may be completed under the existing scoped rules. Tag-only/release-only startup states stop for inspection instead of automatic repair.
+Completed matching publications verify both image tags without rebuilding or retagging. Only a missing package association may be completed under the existing scoped rules. Git-tag-only or release-only startup states stop for inspection instead of automatic repair.
 
 ## Progress and verification
 

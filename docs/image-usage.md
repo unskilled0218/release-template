@@ -6,6 +6,8 @@
 
 ## Authenticate and run
 
+For releases made with template 0.7.0 or later, replace `:latest` with the published version to select a specific release, for example `:1.2.3`. The `v` prefix belongs to the Git tag only.
+
 The existing image is `git.lan/dev/container-release-template-hello:latest`; `example-image` is illustrative, not a published rename. The package requires authorized access. Use your own Gitea login and a protected token with package-read permission; never paste it into logs or command arguments.
 
 ```sh

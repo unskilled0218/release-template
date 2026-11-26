@@ -81,6 +81,11 @@ alias_guard() {
     [[ "$current" == "$predecessor" || "$current" == "$prepared" ]] || stop 'Latest changed since preparation'
   fi
 }
+version_guard() {
+  local current
+  current=$(data resolve "$root" "$work" "$version") || stop 'Cannot verify version tag'
+  [[ "$current" == "$prepared" ]] || stop 'Version tag differs; inspect without repair'
+}
 fresh_guard() {
   scan
   tag_state
@@ -91,6 +96,7 @@ fresh_guard() {
     [[ -z "$remote_oid" || ( -n "${oid:-}" && "$remote_oid" == "$oid" && "$remote_commit" == "$commit" ) ]] || stop 'Requested tag changed'
   fi
   alias_guard
+  version_guard
 }
 publication_guard() {
   local expected_oid=$1 current_image current_latest
@@ -103,6 +109,7 @@ publication_guard() {
   [[ "$current_image" == "$prepared" ]] || stop 'Bound image changed before association'
   current_latest=$(data resolve "$root" "$work" latest) || stop 'Cannot verify latest before association'
   [[ "$current_latest" == "$prepared" ]] || stop 'Latest differs before association'
+  version_guard
 }
 associate_package() {
   local expected_oid=$1
@@ -115,6 +122,6 @@ associate_package() {
   data package-check "$root" "$work" || stop 'Cannot verify final package association'
 }
 success() {
-  printf 'Publication verified: %s\nImage: %s@%s\nLatest: %s:latest\nRelease: %s/%s/releases/tag/%s\n' \
-    "$tag" "$image" "$prepared" "$image" "$origin" "$repository" "$tag"
+  printf 'Publication verified: %s\nImage: %s@%s\nVersion: %s:%s\nLatest: %s:latest\nRelease: %s/%s/releases/tag/%s\n' \
+    "$tag" "$image" "$prepared" "$image" "$version" "$image" "$origin" "$repository" "$tag"
 }

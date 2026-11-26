@@ -108,10 +108,8 @@ promotion_confirmed=false
 run 65536 60 git -C "$root" tag --list "$tag"
 [[ ! -s "$work/command.out" ]] || stop 'Local tag exists without a remote publication; inspect before building'
 predecessor=$(data resolve "$root" "$work" latest) || stop 'Cannot capture predecessor alias'
-config_hash=$(field "$work/settings.json" config_hash)
-staging="rt-${version}-${commit}-${config_hash#sha256:}"
 stage 'staging lookup'
-prepared=$(data image "$root" "$work" "$staging" "$commit" missing) || stop 'Cannot verify staging evidence'
+prepared=$(data image "$root" "$work" "$version" "$commit" missing) || stop 'Cannot verify version tag evidence'
 if [[ -z "$prepared" ]]; then
   fresh_guard
   login
@@ -121,10 +119,10 @@ if [[ -z "$prepared" ]]; then
   progress 'starting multi-platform build; staging may be pushed during this operation'
   publication_state=possible
   run 16777216 7200 docker buildx build --platform linux/amd64,linux/arm64 --provenance=false \
-    --metadata-file "$work/build.json" --push --tag "$image:$staging" \
+    --metadata-file "$work/build.json" --push --tag "$image:$version" \
     --label "org.opencontainers.image.version=$version" --label "org.opencontainers.image.revision=$commit" \
     --label "org.opencontainers.image.source=$origin/$repository" --file "$work/source/Dockerfile" "$work/source"
-  prepared=$(data image "$root" "$work" "$staging" "$commit") || stop 'Cannot verify built image'
+  prepared=$(data image "$root" "$work" "$version" "$commit") || stop 'Cannot verify built image'
   data metadata "$work/build.json" "$prepared"
   progress 'staging build and immutable verification complete'
 else

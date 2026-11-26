@@ -26,9 +26,9 @@ Success prints the version, immutable image, latest alias, and release URL and r
 
 ## Retry states
 
-If both tag and release are absent, a retry may reuse verified staging. If staging was never recoverably published, an explicit retry may build again; there is no durable pre-build journal or exactly-once guarantee.
+Staging now uses the plain version tag itself. If both Git tag and release are absent, a retry may reuse that image after verifying its labels and platforms. Conflicting content stops the release. If the tag is absent, an explicit retry may build again. Keep a single writer for the image: checking a tag does not reserve it atomically.
 
-If both tag and release exist and match the complete current identity/body, verify the annotation-bound immutable digest and require `latest` to equal it. A missing or foreign staging alias is irrelevant: completed verification makes no staging lookup and performs no build, promotion, tag push, or release POST. A correct package link remains read-only; an explicitly unlinked package may receive the one scoped association POST described below. This is the only completed-retry write exception. Missing bound content, an old/foreign/missing final alias, changed source/config/scripts/notes, or newer publication evidence is a refusal, not repair authority.
+If both Git tag and release exist and match the current identity and notes, verify the annotation-bound digest. Both the plain version and `latest` must resolve to it before association and again before success. A missing or changed tag stops verification without repair. The only permitted completed-retry write is linking an explicitly unlinked package as described below.
 
 Tag-only and release-only startup states are ambiguous and stop before builds or publication writes. Without a durable journal, the script cannot distinguish an interrupted first publication from a deleted completed record. Inspect the same source/config and exact remaining objects; any manual completion requires separate review. Do not delete records, rewrite tags/checkpoints, roll back source, or keep retrying with changed identity to force success.
 

@@ -246,7 +246,7 @@ class BashPublicationTests(unittest.TestCase):
     self.assertEqual(events.count("build"), 1)
     self.assertFalse(set(events) & {"tag-push", "promote", "release-post", "package-link"})
     self.assertEqual(self.git("ls-remote", "--tags", "origin"), "")
-    self.assertTrue(any(name.startswith("rt-") for name in self.state()["aliases"]))
+    self.assertIn("1.0.0", self.state()["aliases"])
     self.assertIn(self.state()["prepared"], self.state()["objects"])
 
   def assert_post_confirmation_refusal(self, fault, skip=False, lost=False):
@@ -275,7 +275,7 @@ class BashPublicationTests(unittest.TestCase):
     else:
       self.assertEqual(latest, state["prepared"])
     self.assertEqual(state["releases"], [])
-    self.assertTrue(any(name.startswith("rt-") and value == state["prepared"] for name, value in state["aliases"].items()))
+    self.assertEqual(state["aliases"]["1.0.0"], state["prepared"])
     self.assertIn(state["prepared"], state["objects"])
     oid = self.git("ls-remote", "--tags", "origin", "refs/tags/v1.0.0").split()[0]
     self.assertEqual(oid, state["confirmed_object"])
@@ -800,7 +800,7 @@ class BashPublicationTests(unittest.TestCase):
     self.assertNotEqual(result.returncode, 0)
     self.assert_no_writes()
 
-  def test_publish_and_completed_retry_ignore_missing_or_foreign_staging(self):
+  def test_publish_and_completed_retry_require_both_image_tags(self):
     self.change(hostile_output=True)
     result = self.release()
     self.assertEqual(result.returncode, 0, result.stderr)
@@ -818,14 +818,20 @@ class BashPublicationTests(unittest.TestCase):
     state = self.state()
     self.assertEqual(state["releases"][0]["body"], "# Release v1.0.0\n\nProject changes.\n")
     oid = self.git("ls-remote", "--tags", "origin", "refs/tags/v1.0.0").split()[0]
-    staging = next(name for name in state["aliases"] if name.startswith("rt-"))
-    for aliases in ({"latest": state["prepared"]}, {"latest": state["prepared"], staging: "sha256:" + "0" * 64}):
+    expected = {name: state["prepared"] for name in ("1.0.0", "latest")}
+    self.assertEqual(state["aliases"], expected)
+    foreign = next(key for key in state["objects"] if key != state["prepared"])
+    for aliases in (expected, {"latest": state["prepared"]}, {**expected, "1.0.0": foreign}):
       self.change(aliases=aliases)
       (self.base / "events").write_text("")
       result = self.release()
-      self.assertEqual(result.returncode, 0, result.stderr)
-      self.assert_progress_order(result, ("completed-publication verification", "package association",
-        "final association verification"))
+      if aliases == expected:
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("final association verification", result.stderr)
+      else:
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("Version tag differs", result.stderr)
+        self.assertEqual(self.state()["aliases"], aliases)
       self.assertNotIn("HOSTILE_REMOTE_OUTPUT", result.stdout + result.stderr)
       self.assertNotIn(str(self.token), result.stdout + result.stderr)
       for message in ("starting multi-platform build", "digest promotion", "release creation", "staging lookup"):
@@ -833,6 +839,15 @@ class BashPublicationTests(unittest.TestCase):
       self.assert_no_writes()
       self.assertFalse(any(e.startswith("registry:rt-") for e in self.events()))
       self.assertEqual(self.git("ls-remote", "--tags", "origin", "refs/tags/v1.0.0").split()[0], oid)
+
+  def test_fresh_version_collision_does_not_overwrite_existing_image(self):
+    foreign = self.predecessor()
+    self.change(aliases={"1.0.0": foreign})
+    result = self.release()
+    self.assertNotEqual(result.returncode, 0)
+    self.assertIn("Cannot verify version tag evidence", result.stderr)
+    self.assert_no_writes()
+    self.assertEqual(self.state()["aliases"], {"1.0.0": foreign})
 
   def test_tag_only_startup_refuses_before_staging_or_build(self):
     self.change(fail_release=True)
@@ -870,7 +885,7 @@ class BashPublicationTests(unittest.TestCase):
     failed = self.release()
     self.assertNotEqual(failed.returncode, 0)
     self.assertIn("inspect exact remaining objects without rollback", failed.stderr)
-    self.assertTrue(any(name.startswith("rt-") for name in self.state()["aliases"]))
+    self.assertIn("1.0.0", self.state()["aliases"])
     self.change(lose_build=False)
     result = self.release()
     self.assertEqual(result.returncode, 0, result.stderr)
