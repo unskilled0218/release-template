@@ -8,7 +8,7 @@ Version 0.7.0 publishes one AMD64/ARM64 image under two tags: the plain release 
 
 ## Use
 
-Review [configuration and credentials](docs/bash-configuration.md) once, set your target/login in `scripts/release.json`, and provision a private `~/.config/git/token` file. This repository's settings explicitly target its existing Gitea project and Hello World image; change them before copying it elsewhere. Replace the root Hello World Dockerfile with your application when adopting the template.
+Review [configuration and credentials](docs/bash-configuration.md) once, set your target/login in `scripts/release.json`, and provision a private `~/.config/token/git` file. This repository's settings explicitly target its existing Gitea project and Hello World image; change them before copying it elsewhere. Replace the root Hello World Dockerfile with your application when adopting the template.
 
 ```sh
 ./scripts/release.sh --validate

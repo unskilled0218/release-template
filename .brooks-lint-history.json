@@ -85,7 +85,7 @@
       "warning": 1,
       "suggestion": 0
     },
-    "scope": "Branch 4-migrate-forgejo-to-gitea through 91a7a63 vs main at c88f6e9; 31 changed files including default ~/.config/git/token; HTTP 200 null/404 conflation reproduced"
+    "scope": "Branch 4-migrate-forgejo-to-gitea through 91a7a63 vs main at c88f6e9; 31 changed files including default ~/.config/token/git; HTTP 200 null/404 conflation reproduced"
   },
   {
     "date": "2026-10-23",

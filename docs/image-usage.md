@@ -11,7 +11,7 @@ For releases made with template 0.7.0 or later, replace `:latest` with the publi
 The existing image is `git.lan/dev/container-release-template-hello:latest`; `example-image` is illustrative, not a published rename. The package requires authorized access. Use your own Gitea login and a protected token with package-read permission; never paste it into logs or command arguments.
 
 ```sh
-docker login git.lan --username dev --password-stdin < "$HOME/.config/git/token"
+docker login git.lan --username dev --password-stdin < "$HOME/.config/token/git"
 docker pull git.lan/dev/container-release-template-hello:latest
 docker run --rm git.lan/dev/container-release-template-hello:latest
 ```
