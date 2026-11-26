@@ -1,0 +1,19 @@
+services:
+  app:
+    image: git.lan/dev/npm:latest
+    container_name: release-template
+    stdin_open: true
+    tty: true
+    environment:
+      PW_TEST_CONNECT_WS_ENDPOINT: ws://playwright:3000/
+    networks:
+      - development
+    working_dir: /home/container/workdir
+    volumes:
+      - ./:/home/container/workdir
+      - /var/run/docker.sock:/var/run/docker.sock
+
+networks:
+  development:
+    external: true
+    name: development
