@@ -16,7 +16,7 @@ docker run --rm git.lan/dev/container-release-template-hello:latest
 
 The container prints `Hello World` and exits zero. `docker login` may persist credentials; for temporary authentication, use a private `DOCKER_CONFIG` while preserving your daemon/context. The release tool isolates its own authentication automatically.
 
-Publication verifies the package link to `dev/container-release-template` for its Packages tab. The link covers all package versions; conflicting links are refused. See [association rules](bash-publication.md#package-association). No live 0.7.0 publication or UI result is certified.
+Publication verifies the package link to `dev/release-template` for its Packages tab. The link covers all package versions; conflicting links are refused. See [association rules](bash-publication.md#package-association). No live 0.7.0 publication or UI result is certified.
 
 ## Platforms and immutable references
 

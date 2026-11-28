@@ -9,7 +9,7 @@
 
 Copy and review `scripts/release.sh`, `scripts/release-common.sh`, `scripts/release-data.py`, and `scripts/release.json`. Add a root `Dockerfile`, `.dockerignore`, `VERSION`, and committed Markdown release notes. Ignore `.template-operation.lock`, `.release-template/`, and `.template-transaction/`.
 
-Replace the sample Hello World Dockerfile, Git remote, and target settings before publishing a copied template. This repository targets `dev/container-release-template` and `git.lan/dev/container-release-template-hello`. Commit the setup and push clean `main`; publication does not push source or update other projects.
+Replace the sample Hello World Dockerfile, Git remote, and target settings before publishing a copied template. This repository targets `dev/release-template` and `git.lan/dev/container-release-template-hello`. Commit the setup and push clean `main`; publication does not push source or update other projects.
 
 `origin` must have exactly one effective push URL matching the target. Checks use `git remote get-url --push --all origin`, including rewrites and fallback URLs. Multiple entries, even duplicates, are refused. The first effective fetch URL must also match. Keep Git configuration unchanged and exclude other writers through completion; repeated checks are not atomic locks.
 

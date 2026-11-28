@@ -1,7 +1,7 @@
 {
   "schema": 1,
   "gitea": "https://git.lan",
-  "repository": "dev/container-release-template",
+  "repository": "dev/release-template",
   "image": "git.lan/dev/container-release-template-hello",
   "username": "dev",
   "token_file": "~/.config/token/git",
