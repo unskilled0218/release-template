@@ -1194,6 +1194,7 @@ class BashPublicationTests(unittest.TestCase):
     self.assertEqual(self.state()["unrelated_packages"], unrelated)
     events = self.events()
     self.assertEqual(events.count("package-link"), 1)
+    self.assertNotIn("http:GET:/api/v1/version", events)
     self.assertLess(events.index("release-post"), events.index("package-link"))
     self.assertIn("http:GET:/api/v1/packages/fixtures/container/application-hello/latest", events[events.index("package-link") + 1:])
     self.assertFalse(any("unlink" in event or "DELETE" in event for event in events))
@@ -1257,19 +1258,6 @@ class BashPublicationTests(unittest.TestCase):
     self.assertEqual(self.events().count("package-link"), 1)
     self.assertEqual(self.state()["package_reads"], 2, "HTTP refusals must not reconcile")
 
-  def test_unsupported_server_refuses_link_writes_but_allows_existing_correct_link(self):
-    self.change(gitea_version="1.24.6")
-    result = self.release()
-    self.assertNotEqual(result.returncode, 0)
-    self.assertIn("stable Gitea 1.25.x or exact 28.2.0", result.stderr)
-    self.assertNotIn("package-link", self.events())
-    self.change(linked_repository=self.target_repository())
-    (self.base / "events").write_text("")
-    result = self.release()
-    self.assertEqual(result.returncode, 0, result.stderr)
-    self.assert_no_writes()
-    self.assertNotIn("http:GET:/api/v1/version", self.events())
-
   def test_link_failures_preserve_publication_and_never_repeat_post(self):
     self.assertEqual(self.release().returncode, 0)
     publication = self.state()
@@ -1292,7 +1280,6 @@ class BashPublicationTests(unittest.TestCase):
   def test_failed_association_prerequisite_never_authorizes_link(self):
     self.assertEqual(self.release().returncode, 0)
     for resource, kinds in (("target", ("missing", "unauthorized", "server", "redirect", "null", "wrong_name")),
-                            ("version", ("missing", "unauthorized", "server", "redirect", "null", "malformed", "transport")),
                             ("package", ("missing", "unauthorized", "server", "redirect", "malformed", "null", "overflow",
                                          "absent_repository", "wrong_name", "wrong_version", "transport", "timeout"))):
       for kind in kinds:
@@ -1534,72 +1521,46 @@ class BashDataTests(unittest.TestCase):
 
   def test_association_empty_201_and_lost_transport_reconcile_exactly_once(self):
     config, repository, package = self.association_records()
-    for version in ("1.25.0", "1.25.1", "1.25.123", "28.2.0"):
-      for post in ((201, {}, b""), self.data.CommandFailed("HTTPS request failed")):
-        replies = [(200, {}, self.data.canonical(record)) for record in (repository, package, {"version": version}, repository, package)]
-        replies += [post, (200, {}, self.data.canonical(package | {"repository": repository}))]
-        with self.subTest(version=version, post=post), patch.object(self.data, "http", side_effect=replies) as http:
-          self.data.package_association("unused", config, ensure=True)
-          self.assertEqual([call.args[1] for call in http.call_args_list], ["GET", "GET", "GET", "GET", "GET", "POST", "GET"])
-          self.assertEqual(http.call_args_list[5].args[2], self.data.package_routes(config)[2])
-          self.assertEqual(http.call_args_list[5].kwargs, {})
+    for post in ((201, {}, b""), self.data.CommandFailed("HTTPS request failed")):
+      replies = [(200, {}, self.data.canonical(record)) for record in (repository, package, repository, package)]
+      replies += [post, (200, {}, self.data.canonical(package | {"repository": repository}))]
+      with self.subTest(post=post), patch.object(self.data, "http", side_effect=replies) as http:
+        self.data.package_association("unused", config, ensure=True)
+        self.assertEqual([call.args[1] for call in http.call_args_list], ["GET", "GET", "GET", "GET", "POST", "GET"])
+        self.assertEqual(http.call_args_list[4].args[2], self.data.package_routes(config)[2])
+        self.assertEqual(http.call_args_list[4].kwargs, {})
 
   def test_association_refusal_after_post_never_reconciles(self):
     config, repository, package = self.association_records()
     for failure in (self.data.Refusal("Command output exceeds byte limit"), (401, {}, b"PRIVATE_REMOTE_BODY"),
                     (404, {}, b"PRIVATE_REMOTE_BODY"), (200, {}, b"PRIVATE_REMOTE_BODY")):
       with self.subTest(failure=failure), \
-           patch.object(self.data, "api_document", side_effect=[repository, package, {"version": "1.25.0"}, repository, package]) as read, \
+           patch.object(self.data, "api_document", side_effect=[repository, package, repository, package]) as read, \
            patch.object(self.data, "http", side_effect=[failure]) as http:
         with self.assertRaises(self.data.Refusal) as raised:
           self.data.package_association("unused", config, ensure=True)
         self.assertNotIn("PRIVATE_REMOTE_BODY", str(raised.exception))
-        self.assertEqual(read.call_count, 5)
+        self.assertEqual(read.call_count, 4)
         self.assertEqual(http.call_count, 1)
 
   def test_package_link_http_accepts_empty_201_without_json_parsing(self):
     with patch.object(self.data, "capture", return_value=self.http_reply(201, b"")):
       self.assertEqual(self.data.http("unused", "POST", "https://fixture.invalid/link"), (201, {}, b""))
 
-  def test_unknown_server_contract_cannot_authorize_link_writes(self):
-    config, repository, package = self.association_records()
-    versions = (None, True, 28.2, [], {}, "1.24.6", "1.26.0", "1.25.0-dev", "1.25.00",
-                "28.2.1", "28.1.0", "28.3.0", "29.0.0", "28.2", "v28.2.0", "28.2.00",
-                "28.2.0-dev", "28.2.0+custom", " 28.2.0", "28.2.0\n", "", "PRIVATE_REMOTE_BODY")
-    for server in (None, [], {}, *({"version": version} for version in versions)):
-      with self.subTest(server=server), patch.object(self.data, "api_document", side_effect=[repository, package, server]) as read, \
-           patch.object(self.data, "http") as http:
-        with self.assertRaises(self.data.Refusal) as raised:
-          self.data.package_association("unused", config, ensure=True)
-        self.assertNotIn("PRIVATE_REMOTE_BODY", str(raised.exception))
-        self.assertEqual(str(raised.exception), "Package link writes require supported stable Gitea 1.25.x or exact 28.2.0; server association safety is unverified")
-        self.assertEqual(read.call_count, 3)
-        http.assert_not_called()
-
-  def test_correct_association_needs_no_server_version_even_for_unknown_contracts(self):
-    config, repository, package = self.association_records()
-    for version in ("1.24.6", "28.2.1", "29.0.0", "28.2.0-dev", None):
-      with self.subTest(version=version), \
-           patch.object(self.data, "api_document", side_effect=[repository, package | {"repository": repository}, {"version": version}]) as read, \
-           patch.object(self.data, "http") as http:
-        self.data.package_association("unused", config, ensure=True)
-        self.assertEqual([call.args[1] for call in read.call_args_list], list(self.data.package_routes(config)[:2]))
-        http.assert_not_called()
-
   def test_lost_link_response_requires_exact_readback_not_another_post(self):
     config, repository, package = self.association_records()
     for record in (package, package | {"repository": repository | {"id": 99}}, None):
-      replies = [(200, {}, self.data.canonical(value)) for value in (repository, package, {"version": "1.25.0"}, repository, package)]
+      replies = [(200, {}, self.data.canonical(value)) for value in (repository, package, repository, package)]
       replies += [self.data.CommandFailed("HTTPS request failed"), (200, {}, self.data.canonical(record))]
       with self.subTest(record=record), patch.object(self.data, "http", side_effect=replies) as http, \
            self.assertRaises(self.data.Refusal):
         self.data.package_association("unused", config, ensure=True)
       self.assertEqual([call.args[1] for call in http.call_args_list].count("POST"), 1)
-      self.assertEqual(http.call_count, 7)
+      self.assertEqual(http.call_count, 6)
 
   def test_refreshed_correct_link_skips_post_and_preserves_other_fields(self):
     config, repository, package = self.association_records()
-    records = [repository, package, {"version": "1.25.0"}, repository,
+    records = [repository, package, repository,
                package | {"repository": repository, "html_url": "https://untrusted.invalid"}]
     with patch.object(self.data, "api_document", side_effect=records), patch.object(self.data, "http") as http:
       self.data.package_association("unused", config, ensure=True)
@@ -1856,32 +1817,3 @@ if associate_package tag; then echo continued; fi
       self.assertEqual(self.data.remote_key(url), ("git.lan", "fixtures/application"))
     self.assertEqual(self.data.remote_key("https://git.lan:8443/fixtures/application.git"),
                      ("git.lan:8443", "fixtures/application"))
-
-
-def association_on_gitea_28(test):
-  """Repeat an existing scenario with its own unittest setUp/cleanup lifecycle."""
-  def run(self):
-    self.change(gitea_version="28.2.0")
-    test(self)
-  run.__name__ = test.__name__ + "_gitea_28_2_0"
-  return run
-
-
-# Originals retain the fixture's 1.25.0 default. Each generated case gets fresh Git,
-# token, server state, and event files; fake behavior models the reviewed source.
-for scenario in (
-  "test_fresh_release_links_only_configured_package_and_verifies_it",
-  "test_fresh_release_preserves_correct_link_without_post",
-  "test_fresh_release_refuses_conflicting_link_without_rollback",
-  "test_completed_retry_finishes_only_missing_link_then_becomes_read_only",
-  "test_completed_retry_refuses_foreign_association_without_writes",
-  "test_lost_link_response_is_reconciled_without_repeating_post",
-  "test_hidden_foreign_link_is_refused_by_supported_server_without_reassignment",
-  "test_link_failures_preserve_publication_and_never_repeat_post",
-  "test_failed_association_prerequisite_never_authorizes_link",
-  "test_refreshed_identity_failure_blocks_link",
-  "test_post_link_verification_failure_does_not_undo_accepted_link",
-  "test_publication_change_after_link_prevents_success_without_rollback",
-):
-  case = association_on_gitea_28(getattr(BashPublicationTests, scenario))
-  setattr(BashPublicationTests, case.__name__, case)

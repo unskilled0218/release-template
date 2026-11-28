@@ -408,18 +408,12 @@ def package_linked(work, config, package_url, target_id):
 
 
 def package_association(work, config, ensure=False):
-  """Only explicit unlinked evidence authorizes one POST, under operator writer exclusion."""
+  """Use Gitea's link-if-unlinked operation under operator writer exclusion."""
   target_url, package_url, link_url = package_routes(config)
   target_id = repository_identity(api_document(work, target_url), config["repository"])
   if package_linked(work, config, package_url, target_id):
     return
   require(ensure, "Package is not linked to the configured repository")
-  # Gitea can hide inaccessible links as null. Only reviewed stable contracts
-  # (1.25.x and exact 28.2.0) may rely on the server's existing-link refusal.
-  server = api_document(work, config["gitea"] + "/api/v1/version")
-  require(isinstance(server, dict) and isinstance(server.get("version"), str) and
-          re.fullmatch(r"(?:1\.25\.(0|[1-9][0-9]*)|28\.2\.0)", server["version"]),
-          "Package link writes require supported stable Gitea 1.25.x or exact 28.2.0; server association safety is unverified")
   # Refresh both identities immediately before mutation; never treat failed reads as permission.
   require(repository_identity(api_document(work, target_url), config["repository"]) == target_id,
           "Package target repository changed")

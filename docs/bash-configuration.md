@@ -41,9 +41,9 @@ The script uses its own project root regardless of the calling directory. Old in
 
 Store the token outside the project in a user-owned, readable, non-symlink file with mode 0600 or 0400. Default: `~/.config/git/token`. `GIT_TOKEN` overrides the file path, never the token value; `GIT_USERNAME` overrides the login. Never put tokens in Git, `.env`, shell history, arguments, or logs.
 
-The account/token needs repository and package read/write access, release creation, and target repository package-unit write permission. Git authentication is separate. Token scopes and a supported server version do not grant missing account permissions.
+The account/token needs repository and package read/write access, release creation, and target repository package-unit write permission. Git authentication is separate. Token scopes do not grant missing account permissions.
 
-New package links require stable Gitea `1.25.x` or exact stable `28.2.0`; correct existing links stay read-only without a version check. See [package association](bash-publication.md#package-association) for API contracts, permissions, and mandatory exclusion of other association writers, including UI actions and in-flight requests.
+No Gitea version setting or lookup is required. Correct existing links stay read-only. See [package association](bash-publication.md#package-association) for API contracts, permissions, and mandatory exclusion of other association writers, including UI actions and in-flight requests.
 
 Runtime requires Linux/POSIX, Bash, Python 3.11+ standard library, Git, curl, Docker Buildx, standard utilities, and filesystem locks. No jq, Node, or pip packages are needed. The builder must advertise both platforms before remote Git/auth/build operations; this does not prove runtime execution. See [platform preparation](platform-preparation.md).
 

@@ -57,7 +57,7 @@ Require exact package owner/type/name/version, positive integer ID, and an expli
 - **Conflicting link:** stop without unlinking or reassigning.
 - **Explicit JSON null:** a candidate for linking, not proof of no link. Gitea may hide inaccessible linked repositories as null.
 
-New links require `GET /api/v1/version` to report stable `1.25.x` or exact stable `28.2.0`, whose reviewed services refuse existing links. Other versions, including `28.2.1`, development builds, suffixes, and failed reads cannot authorize writes. Missing packages or invalid/inaccessible evidence also stop linking.
+The script does not query the server version. Automatic linking requires a link endpoint that refuses to replace an existing association, including a hidden one. The client cannot verify that behavior from a null repository or from readback after a write. If your server does not provide that guarantee, link the package manually before running publication. Missing packages or invalid/inaccessible evidence also stop linking.
 
 Refresh repository/package evidence, then send one bodyless `POST /api/v1/packages/{owner}/container/{name}/-/link/{repo_name}`. Require empty HTTP 201 and exact readback. No other package is enumerated or changed. Linking requires package-write access, appropriate token scopes, matching owners, and target repository package-unit write permission.
 

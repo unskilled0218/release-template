@@ -43,7 +43,7 @@ There is no network-only preflight mode. Run publication only when ready for wri
 - Gitea: complete authenticated tag/release inventories for the requested version.
 - Registry: predecessor/staging manifests and matching evidence; login precedes build or staging reuse.
 
-Failed or incomplete evidence stops publication. Successful reads/login do not guarantee later write permissions or availability. Package permissions, server-version gates, and association evidence are checked **after publication** under the [association rules](bash-publication.md#package-association), not as early-readiness guarantees.
+Failed or incomplete evidence stops publication. Successful reads/login do not guarantee later write permissions or availability. Package permissions and association evidence are checked **after publication** under the [association rules](bash-publication.md#package-association), not as early-readiness guarantees.
 
 ## Build and publish
 

@@ -24,7 +24,7 @@ Coverage includes:
 
 - Fresh publication, staging reuse, completed retries without staging lookup, ambiguous startup, exact annotations/notes/digests, source snapshots, and old-state refusal.
 - Real Git URL rewriting, push fan-out/duplicates, and changed destination evidence. Tag/alias conflicts and failed reads block later writes without repair, including skipped and reconciled promotions.
-- Package identity, correct/unlinked/conflicting/hidden links, stable `1.25.x` and exact `28.2.0` gates, permissions modeled by fixtures, empty 201, lost responses, and post-link verification. Completed retries can finish only a missing link.
+- Package identity, correct/unlinked/conflicting/hidden links, linking without a version endpoint, permissions modeled by fixtures, empty 201, lost responses, and post-link verification. Completed retries can finish only a missing link.
 - Private auth, Bearer challenges, host/context/TLS/builder selection, and modeled extra/config-local/system plugin order across preflight/build/promotion. Cases include relative paths, spaces, symlinks, malformed/bounded config, and alternate discovery-field spelling refusal.
 - Lock ownership, inherited descriptors, setup guidance, signals, cleanup, and suppression of token/path/raw-output sentinels. A FIFO barrier checks that progress is visible while a build is blocked.
 - Exact/over-limit receives, blocked stdin, unending output, timeouts/descendant termination, and inventory page/item/byte/time budgets. Incomplete, repeated, duplicate, or malformed evidence blocks subsequent writes.

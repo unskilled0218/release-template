@@ -15,7 +15,7 @@ Follow [configuration and credentials](docs/bash-configuration.md). When copying
 ./scripts/release.sh
 ```
 
-Publication writes real Git tags, images, releases, and package links. Use clean, already-pushed `main` and exclude other writers through completion. New package links require stable Gitea 1.25.x or exact stable 28.2.0. Read the [release checklist](docs/release-process.md) and [recovery rules](docs/bash-publication.md) first.
+Publication writes real Git tags, images, releases, and package links. Use clean, already-pushed `main` and exclude other writers through completion. Package linking uses the Gitea API directly without checking the server version. Read the [release checklist](docs/release-process.md) and [recovery rules](docs/bash-publication.md) first.
 
 Only the Bash workflow is supported. It does not migrate old transactions, update itself, delete images, or reassign packages. Verification is local only; see [known limits](docs/bash-publication.md#known-limits).
 

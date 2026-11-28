@@ -254,10 +254,7 @@ association_resource = None
 event("http:" + method + ":" + route)
 if state.get("http_transport_failure"):
   sys.exit(7)
-if route == "/api/v1/version" and method == "GET":
-  association_resource = "version"
-  body = {"version": state.get("gitea_version", "1.25.0")}
-elif route == "/api/v1/repos/fixtures/application" and method == "GET":
+if route == "/api/v1/repos/fixtures/application" and method == "GET":
   association_resource = "target"
   body = target_repository
 elif route == "/api/v1/packages/fixtures/container/application-hello/latest" and method == "GET":
