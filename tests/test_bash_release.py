@@ -95,7 +95,7 @@ class BashPublicationTests(unittest.TestCase):
     self.token.write_text("SENTINEL_PRIVATE_TOKEN\n")
     self.token.chmod(0o600)
     config = json.loads((self.root / "scripts/release.json").read_text())
-    config |= {"repository": "fixtures/application", "image": "git.lan/fixtures/application-hello",
+    config |= {"repository": "fixtures/application", "image": "git.l.an/fixtures/application-hello",
                "notes": "notes.md", "token_file": str(self.token)}
     (self.root / "scripts/release.json").write_text(json.dumps(config))
     self.state_path = self.base / "state.json"
@@ -163,7 +163,7 @@ class BashPublicationTests(unittest.TestCase):
       return helper_module().source(self.root, remote=False)
 
   def test_real_git_push_fanout_is_refused(self):
-    allowed = "https://git.lan/fixtures/application.git"
+    allowed = "https://git.l.an/fixtures/application.git"
     original = (self.root / ".git/config").read_text()
     for key in ("url", "pushurl"):
       for extra in (allowed, "https://foreign.invalid/other/project.git"):
@@ -182,8 +182,8 @@ class BashPublicationTests(unittest.TestCase):
 
   def test_real_git_single_push_targets_keep_supported_normalization(self):
     original = (self.root / ".git/config").read_text()
-    for destination in ("https://git.lan/fixtures/application.git", "https://git.lan:443/fixtures/application",
-                        "git@git.lan:fixtures/application.git", "ssh://git@git.lan:2222/fixtures/application.git"):
+    for destination in ("https://git.l.an/fixtures/application.git", "https://git.l.an:443/fixtures/application",
+                        "git@git.l.an:fixtures/application.git", "ssh://git@git.l.an:2222/fixtures/application.git"):
       for explicit in (False, True):
         with self.subTest(destination=destination, explicit=explicit):
           (self.root / ".git/config").write_text(original)
@@ -193,7 +193,7 @@ class BashPublicationTests(unittest.TestCase):
           self.assertEqual(self.real_source(), self.git("rev-parse", "HEAD"))
 
   def test_real_git_destination_rewrites_are_validated(self):
-    allowed = "https://git.lan/fixtures/application.git"
+    allowed = "https://git.l.an/fixtures/application.git"
     original = (self.root / ".git/config").read_text()
     for rule in ("insteadOf", "pushInsteadOf"):
       for target in (allowed, "https://foreign.invalid/other/project.git"):
@@ -213,7 +213,7 @@ class BashPublicationTests(unittest.TestCase):
                 data.source(self.root, remote=False)
 
   def test_push_url_evidence_refuses_before_publication(self):
-    allowed = "https://git.lan/fixtures/application.git\n"
+    allowed = "https://git.l.an/fixtures/application.git\n"
     cases = ({"push_url_output": allowed + "https://foreign.invalid/other/project.git\n"},
              {"push_url_output": allowed * 2}, {"push_url_output": ""},
              {"push_url_output": "\n"}, {"push_url_output": allowed + "\n"},
@@ -490,7 +490,7 @@ class BashPublicationTests(unittest.TestCase):
   def assert_connection_preserved(self, expected_endpoint, expected_builder="fixture-builder"):
     selections = [json.loads(line) for line in (self.base / "docker-selections").read_text().splitlines()]
     operations = {tuple(row["operation"]) for row in selections}
-    self.assertTrue({("buildx", "inspect"), ("login", "git.lan"), ("buildx", "build"), ("buildx", "imagetools")} <= operations)
+    self.assertTrue({("buildx", "inspect"), ("login", "git.l.an"), ("buildx", "build"), ("buildx", "imagetools")} <= operations)
     self.assertEqual({row["endpoint"] for row in selections}, {expected_endpoint})
     self.assertEqual({row["builder"] for row in selections}, {expected_builder})
     self.assertEqual({row["tls_verify"] for row in selections}, {self.environment.get("DOCKER_TLS_VERIFY")})
@@ -1827,8 +1827,8 @@ if associate_package tag; then echo continued; fi
       self.data.command([sys.executable, "-c", "import time; time.sleep(5)"], seconds=0.05, input_data=b"x" * 65536)
 
   def test_git_destination_normalization_keeps_ssh_ports_independent(self):
-    for url in ("git@git.lan:fixtures/application.git", "ssh://git@git.lan:2222/fixtures/application.git",
-                "https://git.lan:443/fixtures/application.git"):
-      self.assertEqual(self.data.remote_key(url), ("git.lan", "fixtures/application"))
-    self.assertEqual(self.data.remote_key("https://git.lan:8443/fixtures/application.git"),
-                     ("git.lan:8443", "fixtures/application"))
+    for url in ("git@git.l.an:fixtures/application.git", "ssh://git@git.l.an:2222/fixtures/application.git",
+                "https://git.l.an:443/fixtures/application.git"):
+      self.assertEqual(self.data.remote_key(url), ("git.l.an", "fixtures/application"))
+    self.assertEqual(self.data.remote_key("https://git.l.an:8443/fixtures/application.git"),
+                     ("git.l.an:8443", "fixtures/application"))

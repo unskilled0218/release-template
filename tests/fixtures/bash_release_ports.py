@@ -90,7 +90,7 @@ if tool == "git":
     if "--push" in arguments:
       if state.get("push_urls_change_after_build") and state.get("prepared"):
         state.pop("push_urls_change_after_build")
-        state["push_url_output"] = "https://git.lan/fixtures/application.git\nhttps://foreign.invalid/other/project.git\n"
+        state["push_url_output"] = "https://git.l.an/fixtures/application.git\nhttps://foreign.invalid/other/project.git\n"
         event("push-urls-changed")
         save()
       if "--all" in arguments:
@@ -109,7 +109,7 @@ if tool == "git":
         # Model get-url's first-entry default separately from --all.
         sys.stdout.write(value if "--all" in arguments else value.split("\n")[0] + "\n")
         sys.exit(0)
-    print("https://git.lan/" + ("foreign/project.git" if state.get("wrong_remote") else "fixtures/application.git"))
+    print("https://git.l.an/" + ("foreign/project.git" if state.get("wrong_remote") else "fixtures/application.git"))
     sys.exit(0)
   if "ls-remote" in arguments and "refs/heads/main" in arguments and state.get("wrong_main"):
     print("a" * 40 + "\trefs/heads/main")

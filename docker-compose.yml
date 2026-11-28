@@ -1,6 +1,6 @@
 services:
   app:
-    image: git.lan/dev/npm:latest
+    image: git.l.an/dev/npm:latest
     container_name: release-template
     stdin_open: true
     tty: true
