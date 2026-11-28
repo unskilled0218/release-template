@@ -15,7 +15,7 @@ After [setup](bash-configuration.md), run `./scripts/release.sh` from clean, alr
 The command rejects old installation/checkpoint state, checks builder platforms, and verifies remote `main` and [Git destinations](bash-configuration.md#files-and-setup). It never pushes source. For a fresh version, it then:
 
 1. Reads complete tag/release inventories and captures `latest` as the predecessor.
-2. Reuses verified release-specific staging or builds both platforms from a private committed snapshot with `--push`.
+2. Reuses verified staging under the plain version tag or builds both platforms from a private committed snapshot with `--push`.
 3. Verifies immutable manifests/configuration labels and pushes the exact deterministic annotated Git tag.
 4. Promotes the verified digest to `latest` without rebuilding, then creates the notes-only Gitea release.
 5. Verifies publication, links the configured package, and rechecks both before success.
@@ -32,7 +32,7 @@ Success prints `Publication verified` with the version, immutable image, latest 
 
 - **Tag and release absent:** a retry may reuse verified staging or build again if no recoverable staging exists. There is no durable pre-build journal or exactly-once guarantee.
 
-- **Both present and matching:** verify the complete identity/body, bound immutable digest, and exact `latest`. No staging lookup, build, promotion, tag push, or release POST occurs. Only a missing [package association](#package-association) may be completed. Missing bound content, a wrong/missing final alias, changed inputs, or newer publication evidence stops the retry.
+- **Both present and matching:** verify the complete identity/body, bound immutable digest, and that both the plain version and `latest` resolve to that digest. No build, promotion, tag push, or release POST occurs. Only a missing [package association](#package-association) may be completed. Missing bound content, a wrong/missing final alias, changed inputs, or newer publication evidence stops the retry.
 
 - **Only tag or release present:** stop before builds or publication writes. Without a durable journal, interruption and deletion are indistinguishable. Inspect the original inputs and exact remaining objects; manual completion needs separate review.
 
@@ -88,6 +88,6 @@ Checks detect observed conflicts but cannot make cross-service writes atomic. Ke
 
 ## Known limits
 
-Verification is local and model-based, not certification of native Docker plugin/daemon/TLS behavior, deployed APIs/UI, runtime emulation, storage, power-loss durability, or a live 0.6.3 release. Earlier live results remain historical; see [verification](verification.md).
+Verification is local and model-based, not certification of native Docker plugin/daemon/TLS behavior, deployed APIs/UI, runtime emulation, storage, power-loss durability, or a live 0.7.0 release. Earlier live results remain historical; see [verification](verification.md).
 
 Docker config has deliberate [parsing restrictions](bash-configuration.md#credentials-and-prerequisites). Plugin search order is preserved, not executable contents; keep files/configuration stable. There is no distributed lock, durable journal, or SIGKILL cleanup. Live experiments require separate approval for target/source/version, resource scope, credentials, platforms, and writer exclusion.

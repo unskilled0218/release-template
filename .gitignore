@@ -3,3 +3,4 @@ __pycache__/
 .release-template/
 .template-transaction/
 .template-operation.lock
+command.md

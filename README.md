@@ -4,11 +4,11 @@
   - [Use](#use)
   - [Development](#development)
 
-Version 0.6.3 publishes one AMD64/ARM64 container image and links its package to a Gitea repository. See [release notes](docs/releases/0.6.3.md).
+Version 0.7.0 publishes one AMD64/ARM64 container image under the plain version tag and `latest`, and links its package to a Gitea repository. See [release notes](docs/releases/0.7.0.md).
 
 ## Use
 
-Follow [configuration and credentials](docs/bash-configuration.md). When copying the template, replace the sample Dockerfile, Git remote, and target/login settings in `scripts/release.json`. Store your token privately in `~/.config/git/token`.
+Follow [configuration and credentials](docs/bash-configuration.md). When copying the template, replace the sample Dockerfile, Git remote, and target/login settings in `scripts/release.json`. Store your token privately in `~/.config/token/git`.
 
 ```sh
 ./scripts/release.sh --validate

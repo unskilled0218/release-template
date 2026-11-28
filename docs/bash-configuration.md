@@ -39,7 +39,7 @@ The script uses its own project root regardless of the calling directory. Old in
 
 ## Credentials and prerequisites
 
-Store the token outside the project in a user-owned, readable, non-symlink file with mode 0600 or 0400. Default: `~/.config/git/token`. `GIT_TOKEN` overrides the file path, never the token value; `GIT_USERNAME` overrides the login. Never put tokens in Git, `.env`, shell history, arguments, or logs.
+Store the token outside the project in a user-owned, readable, non-symlink file with mode 0600 or 0400. Default: `~/.config/token/git`. `GIT_TOKEN` overrides the file path, never the token value; `GIT_USERNAME` overrides the login. Never put tokens in Git, `.env`, shell history, arguments, or logs.
 
 The account/token needs repository and package read/write access, release creation, and target repository package-unit write permission. Git authentication is separate. Token scopes do not grant missing account permissions.
 

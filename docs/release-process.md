@@ -51,7 +51,7 @@ Failed or incomplete evidence stops publication. Successful reads/login do not g
 ./scripts/release.sh
 ```
 
-The command reuses verified staging or builds both platforms from committed source with `docker buildx build --push`. Staging may exist even when the build reports failure.
+The command reuses the verified plain version tag (for example, `1.2.3`) or builds both platforms from committed source with `docker buildx build --push`. Staging may exist even when the build reports failure.
 
 It verifies the immutable image, pushes the annotated tag, promotes the digest without rebuilding, creates the notes-only release, and verifies publication and package association. See [publication and recovery](bash-publication.md) for guards and limits. No image deletion, retention, rollback, reassignment, or host setup runs automatically.
 

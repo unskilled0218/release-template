@@ -4,7 +4,7 @@
   "repository": "dev/container-release-template",
   "image": "git.lan/dev/container-release-template-hello",
   "username": "dev",
-  "token_file": "~/.config/git/token",
-  "notes": "docs/releases/0.6.3.md",
+  "token_file": "~/.config/token/git",
+  "notes": "docs/releases/0.7.0.md",
   "platforms": ["linux/amd64", "linux/arm64"]
 }
